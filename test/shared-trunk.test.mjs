@@ -354,3 +354,82 @@ test('re-patching does not stack wrappers', async () => {
   await engine.compactIfNeeded({ session: a })
   assert.equal(engine.summarizeCalls, 1)
 })
+
+// ---- recall references --------------------------------------------------------
+
+/** deps with archive callbacks that record what they were asked to keep. */
+function recallDeps(memo, registry) {
+  const d = deps(memo, registry)
+  d.kept = []
+  d.archiveTrunk = async (agent, plan) => { d.kept.push(['trunk', agent.session.id, plan.startSeq, plan.endSeq]); return 'trunk:' + plan.key }
+  d.archiveRange = async (agent, s, e) => { d.kept.push(['span', agent.session.id, s, e]); return 'session-0123456789ab/aaaaaaaaaaaa-00000' + d.kept.length }
+  return d
+}
+
+const footerOf = (id) => '[Full original of this checkpoint: context_recall archive="' + id + '"]'
+
+test('recall: the shared trunk checkpoint references the trunk archive, byte-identical for every sibling', async () => {
+  const engine = new FakeEngine()
+  const d = recallDeps(new SharedTrunkMemo(null), new ForkRegistry(null))
+  patchEngine(engine, d)
+  const a = makeFork('session-a', 'parser')
+  const b = makeFork('session-b', 'renderer')
+  await engine.compactIfNeeded({ session: a })
+  await engine.compactIfNeeded({ session: b })
+  assert.equal(engine.summarizeCalls, 1)
+  assert.deepEqual(checkpointContent(a), checkpointContent(b))
+  const key = trunkKey(a.snapshotEvents(0, 9))
+  assert.equal(checkpointContent(a)[1].text, 'SUMMARY by session-a of 4 nodes\n\n' + footerOf('trunk:' + key))
+  assert.deepEqual(d.kept, [['trunk', 'session-a', 2, 7], ['trunk', 'session-b', 2, 7]], 'each sibling makes sure the archive exists')
+})
+
+test('recall: an automatic compaction outside the trunk keeps its span and references it', async () => {
+  const engine = new FakeEngine()
+  const d = recallDeps(new SharedTrunkMemo(null), new ForkRegistry(null))
+  patchEngine(engine, d)
+  const lead = makeParent()
+  await engine.compactIfNeeded({ session: lead })
+  assert.deepEqual(d.kept, [['span', 'session-lead', 2, 6]])
+  const content = lead.log[lead.surface.nodes[1]].data.content
+  assert.equal(content[1].text, 'SUMMARY by session-lead of 3 nodes\n\n' + footerOf('session-0123456789ab/aaaaaaaaaaaa-000001'))
+  assert.equal(content[1].extra, 'provider-specific', 'other block fields stay')
+  assert.deepEqual(engine._acArchiveIds, {}, 'the one-shot id is consumed')
+})
+
+test('recall: a clamped compaction keeps only the clamped span', async () => {
+  const engine = new FakeEngine()
+  const d = recallDeps(new SharedTrunkMemo(null), new ForkRegistry(null))
+  patchEngine(engine, d)
+  const a = makeFork('session-a', 'parser')
+  await engine.compactIfNeeded({ session: a })
+  await engine.compactIfNeeded({ session: a })
+  assert.deepEqual(d.kept[1], ['span', 'session-a', 11, 13])
+})
+
+test('recall: an id registered by the tool path is used once and not archived twice', async () => {
+  const engine = new FakeEngine()
+  const d = recallDeps(new SharedTrunkMemo(null), new ForkRegistry(null))
+  patchEngine(engine, d)
+  const a = makeFork('session-a', 'parser')
+  engine._externalSummary = { 'session-a': 'MY OWN CHECKPOINT' }
+  engine._acArchiveIds = { 'session-a': 'session-0123456789ab/bbbbbbbbbbbb-000009' }
+  await engine.compactRegion(11, 12, { session: a })
+  assert.deepEqual(d.kept, [], 'the wrapper did not archive again')
+  assert.equal(checkpointContentAt(a, 5)[1].text, 'MY OWN CHECKPOINT\n\n' + footerOf('session-0123456789ab/bbbbbbbbbbbb-000009'))
+  assert.equal(engine._acArchiveIds['session-a'], undefined)
+})
+
+test('recall: a failing archive never blocks the compaction', async () => {
+  const engine = new FakeEngine()
+  const d = recallDeps(new SharedTrunkMemo(null), new ForkRegistry(null))
+  d.archiveRange = async () => { throw new Error('disk full') }
+  d.archiveTrunk = async () => { throw new Error('disk full') }
+  patchEngine(engine, d)
+  const lead = makeParent()
+  await engine.compactIfNeeded({ session: lead })
+  assert.equal(lead.log[lead.surface.nodes[1]].data.content[1].text, 'SUMMARY by session-lead of 3 nodes')
+  const a = makeFork('session-a', 'parser')
+  await engine.compactIfNeeded({ session: a })
+  assert.equal(checkpointContent(a)[1].text, 'SUMMARY by session-a of 4 nodes')
+  assert.equal(d.logs.filter((l) => l.includes('not archived')).length, 2)
+})

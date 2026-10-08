@@ -17,6 +17,7 @@ import { CtxSurfaceService } from './ctx-surface.js'
 import { resolveBoundaries, soleToolCall, spanText } from './boundary.js'
 import { ForkRegistry, SharedTrunkMemo } from './memo.js'
 import { forkCut, forkParent, lockedSpanError, surfaceEvents } from './trunk.js'
+import { DEFAULT_MAX_CHARS, MAX_CHARS, TrunkArchive, referencedIds, renderRecall, spanArchiveId, splitBlocks, trunkRecallId } from './recall.js'
 import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode, TrunkDeps } from './optimizer.js'
 import type { TrunkSessionLike } from './trunk.js'
 
@@ -49,11 +50,37 @@ export function apply(ctx: Context, config: Config) {
   const logWarn = (msg: string) => ctx.logger.warn('%s', msg)
   const memo = new SharedTrunkMemo(storeDir, logWarn)
   const registry = new ForkRegistry(storeDir, logWarn)
+  const trunkArchive = new TrunkArchive(storeDir)
   const trunkDeps: TrunkDeps = {
     memo,
     registry,
     guard: config.trunkGuard !== false,
     log: (level, msg) => (level === 'warn' ? ctx.logger.warn('%s', msg) : ctx.logger.info('%s', msg)),
+    // Recall: the raw trunk goes to its content-addressed archive (once for all siblings).
+    archiveTrunk: async (agent, plan) => {
+      if (!config.autoArchive || !agent.session) return null
+      const a = agent as AgentWithSession
+      return trunkArchive.ensure(plan.key, async () => {
+        const nodes = await readSurfaceNodes(a)
+        const si = nodes ? nodes.findIndex((n) => n.seq === plan.startSeq) : -1
+        const ei = nodes ? nodes.findIndex((n) => n.seq === plan.endSeq) : -1
+        if (!nodes || si < 0 || ei < si) throw new Error('trunk ' + plan.startSeq + '..' + plan.endSeq + ' not found on the read surface')
+        return spanText(nodes, si, ei)
+      })
+    },
+    // Recall: an automatic compaction's raw span goes to the session's spill archive.
+    archiveRange: async (agent, startSeq, endSeq) => {
+      if (!config.autoArchive || !agent.session) return null
+      const a = agent as AgentWithSession
+      const spillStore = resolveService(a, 'spillStore') as SpillStoreLike | undefined
+      if (!spillStore) return null
+      const nodes = await readSurfaceNodes(a)
+      const si = nodes ? nodes.findIndex((n) => n.seq === startSeq) : -1
+      const ei = nodes ? nodes.findIndex((n) => n.seq === endSeq) : -1
+      if (!nodes || si < 0 || ei < si) return null
+      const archived = await archiveSpan(a, spillStore, nodes, si, ei)
+      return archived ? spanArchiveId(spillRootOf(spillStore), String(archived.locator)) : null
+    },
   }
 
   // 为浏览器「上下文」面板注册 ctxSurface 服务（`ctxSurface/read`）。
@@ -262,7 +289,7 @@ export function apply(ctx: Context, config: Config) {
     disposers.push(systemPrompt.section({
       name: 'tool:context_compact',
       order: 118,
-      text: 'Use the context_compact tool to proactively externalize conversation spans that have served their purpose, the way a smart human memory keeps what matters and lets go of the rest — routine memory hygiene, not a last resort. Compress only a span whose information a summary fully covers for the rest of the conversation; if verbatim detail may still be needed, leave it. The tool replaces only the span you select: compress in segments by sub-task/module: when a single sub-task has consumed a big share of the surface and reaches a conclusion, compact that module\'s span in chunks before moving on — never accumulate separate dead spans into one giant compression. Compress large outputs (log queries, big file reads) as soon as they are read and digested. Evaluate whenever a span has been used up, not only at topic boundaries, and never compress the opening, the in-flight task, or the active instruction; preserve exact paths, commands, IDs, and the user\'s requirements in the checkpoint. Forked sessions: when this session was forked from another (a teammate or subagent created as a fork) or has forks of its own, the inherited history is a trunk shared with them, and the inference engine reuses its prompt cache only while that trunk stays byte-identical everywhere. Never compact a span inside that trunk with the default scope; when the trunk itself must shrink, call context_compact with scope "trunk", which compacts the whole inherited trunk into one shared checkpoint that every sibling reuses byte for byte.',
+      text: 'Use the context_compact tool to proactively externalize conversation spans that have served their purpose, the way a smart human memory keeps what matters and lets go of the rest — routine memory hygiene, not a last resort. Compress only a span whose information a summary fully covers for the rest of the conversation; if verbatim detail may still be needed, leave it. The tool replaces only the span you select: compress in segments by sub-task/module: when a single sub-task has consumed a big share of the surface and reaches a conclusion, compact that module\'s span in chunks before moving on — never accumulate separate dead spans into one giant compression. Compress large outputs (log queries, big file reads) as soon as they are read and digested. Evaluate whenever a span has been used up, not only at topic boundaries, and never compress the opening, the in-flight task, or the active instruction; preserve exact paths, commands, IDs, and the user\'s requirements in the checkpoint. Forked sessions: when this session was forked from another (a teammate or subagent created as a fork) or has forks of its own, the inherited history is a trunk shared with them, and the inference engine reuses its prompt cache only while that trunk stays byte-identical everywhere. Never compact a span inside that trunk with the default scope; when the trunk itself must shrink, call context_compact with scope "trunk", which compacts the whole inherited trunk into one shared checkpoint that every sibling reuses byte for byte. When a detail you need was compacted away, read it back with context_recall instead of guessing or redoing the work.',
     }))
   }
 
@@ -348,7 +375,7 @@ export function apply(ctx: Context, config: Config) {
 
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span is archived to a spill artifact, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: ① Progress — compact each finished step at its topic boundary, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown, terse bullets, ## sections; keep exact paths/commands/IDs and the user\'s requirements and direction. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; checkpoint must be smaller than the compressed span; edges snap to balanced tool-call/result boundaries. Shared trunk: in a forked session (or one with forks of its own) the inherited history is shared with the other forks; a default-scope span may not start inside it. scope "trunk" compacts exactly that inherited trunk — no anchors, no summary — into one checkpoint that is generated once and reused byte for byte by every sibling, keeping the shared prompt cache intact.',
+    description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span stays readable with context_recall, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: ① Progress — compact each finished step at its topic boundary, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown, terse bullets, ## sections; keep exact paths/commands/IDs and the user\'s requirements and direction. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; checkpoint must be smaller than the compressed span; edges snap to balanced tool-call/result boundaries. Shared trunk: in a forked session (or one with forks of its own) the inherited history is shared with the other forks; a default-scope span may not start inside it. scope "trunk" compacts exactly that inherited trunk — no anchors, no summary — into one checkpoint that is generated once and reused byte for byte by every sibling, keeping the shared prompt cache intact.',
     parameters: {
       scope: { type: 'string', enum: ['span', 'trunk'], description: 'Optional. "span" (default) compacts the span between the anchors with your summary. "trunk" compacts the whole history this forked session shares with its siblings or forks into the shared checkpoint; startAnchor, endAnchor and summary are ignored.' },
       startAnchor: { type: 'string', description: 'Verbatim opening of the span\'s first message. Required for a middle span; omitting starts at the conversation\'s first message, discarding opening requirements and direction — only for compressing all history up to endAnchor or rebaselining.' },
@@ -388,6 +415,7 @@ export function apply(ctx: Context, config: Config) {
             },
             description: 'Present only for scope "trunk".',
           },
+          recall: { type: 'string', description: 'Archive id of the compacted original, for context_recall.' },
         },
       },
       render(args, value) { return [{ type: 'text', text: JSON.stringify(value) }] },
@@ -444,23 +472,30 @@ export function apply(ctx: Context, config: Config) {
         ext[agent.session.id] = args.summary as string
       }
 
+      // Span scope keeps its raw span in the session's spill archive here; the
+      // trunk scope keeps it in the shared trunk archive (runTrunkCompaction).
       const spillStore = resolveService(agent, 'spillStore') as SpillStoreLike | undefined
+      const optimized = engine as unknown as OptimizedEngineLike
       let archived: SurfaceArchive | null = null
       let archiveError: JsonValue | null = null
-      if (config.autoArchive && spillStore && si >= 0 && ei >= si) {
+      let recallId: string | null = null
+      if (!trunkPlan && config.autoArchive && spillStore && si >= 0 && ei >= si) {
         try {
           archived = await archiveSpan(agent, spillStore, nodes, si, ei)
+          recallId = archived ? spanArchiveId(spillRootOf(spillStore), String(archived.locator)) : null
         } catch (err) {
           archiveError = err && (err as Error).message ? (err as Error).message : String(err)
         }
-      } else if (config.autoArchive) {
+      } else if (!trunkPlan && config.autoArchive) {
         archiveError = spillStore ? 'span not found on the read surface; raw copy not saved (compaction still proceeds)' : 'spillStore unavailable; raw copy not saved (compaction still proceeds)'
       }
+      // One shot: the patched summarize() appends the recall reference to this checkpoint.
+      if (recallId) (optimized._acArchiveIds ??= {})[agent.session.id] = recallId
 
       let result: CompactionResultLike
       try {
         result = trunkPlan
-          ? await runTrunkCompaction(engine as unknown as OptimizedEngineLike, agent, trunkPlan, exec.signal) as CompactionResultLike
+          ? await runTrunkCompaction(optimized, agent, trunkPlan, exec.signal) as CompactionResultLike
           : await engine.compactRegion(startSeq, endSeq, agent, exec.signal)
       } catch (err) {
         const msg = err && (err as Error).message ? (err as Error).message : String(err)
@@ -468,12 +503,16 @@ export function apply(ctx: Context, config: Config) {
         const ext = (engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary
         if (ext) delete ext[agent.session.id]
         throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg)
+      } finally {
+        if (optimized._acArchiveIds) delete optimized._acArchiveIds[agent.session.id]
       }
       if (trunkPlan) {
         // Decide "reused" from the stored entry's origin: with concurrent siblings
         // a pre-check cannot tell who generated the text.
         const entry = await memo.get(trunkPlan.key)
         trunkReused = !!entry && entry.origin.sessionId !== agent.session.id
+        // The trunk archive id follows from the key (see trunkRecallId).
+        recallId = entry ? trunkRecallId(trunkPlan.key, entry.blocks) : null
       }
       const usage = findSummaryUsage(agent.session, result.compactionId)
       // 成对清理：检查点是单独注入的，为避免检查点文本在 surface 出现两次，
@@ -514,9 +553,11 @@ export function apply(ctx: Context, config: Config) {
                     : ''
                   const doneText = (trunkPlan
                     ? '`context_compact` scope "trunk" done: the inherited trunk is now the shared checkpoint above (' + (trunkReused ? 'reused byte for byte from a sibling' : 'generated here; siblings will reuse it byte for byte') + '); do not call scope "trunk" again'
-                    : '`context_compact` done: checkpoint above') + freedText + (locText
-                    ? '; raw span archived at ' + locText + '.'
-                    : '; raw span not archived.')
+                    : '`context_compact` done: checkpoint above') + freedText + (recallId
+                    ? '; full original kept for context_recall archive="' + recallId + '".'
+                    : locText
+                      ? '; raw span archived at ' + locText + '.'
+                      : '; raw span not archived.')
                   session.append('user/message', createShadowUserMessage(doneText), {
                     surfaceOp: { op: 'replace', startSeq: assistantSeq, endSeq: assistantSeq },
                     sourceEventSeqs: [assistantSeq],
@@ -547,6 +588,7 @@ export function apply(ctx: Context, config: Config) {
         archived: { locator: JsonValue; retrievalHint: JsonValue } | null
         archiveError?: string
         sharedTrunk?: { key: string; reused: boolean }
+        recall?: string
       } = {
         ok: true,
         archived: archived ? {
@@ -556,7 +598,62 @@ export function apply(ctx: Context, config: Config) {
       }
       if (archiveError) out.archiveError = typeof archiveError === 'string' ? archiveError : String(archiveError)
       if (trunkPlan) out.sharedTrunk = { key: trunkPlan.key, reused: trunkReused }
+      if (recallId) out.recall = recallId
       return out
+    },
+  })))
+
+  // Recall: read a compacted span's original back. The result is a tool result
+  // at the end of the conversation, so the cached prefix stays as it is.
+  disposers.push(tools.register(defineTool({
+    name: 'context_recall',
+    description: 'Read the original messages behind a checkpoint. Every checkpoint ends with a reference `context_recall archive="…"`; pass that id to read the compacted span verbatim, page by page, or with query only the messages that contain it. The result is appended at the end of the conversation; earlier context stays unchanged. Without archive, lists the archives the checkpoints in this conversation reference.',
+    parameters: {
+      archive: { type: 'string', description: 'Archive id from a checkpoint\'s context_recall reference. Omit to list the referenced archives.' },
+      query: { type: 'string', description: 'Optional. Return only the messages that contain every word of this text (case-insensitive) instead of all messages in order.' },
+      offset: { type: 'number', description: 'Optional. Skip this many messages (matches when query is set). Default 0; the result names the offset that continues it.' },
+      maxChars: { type: 'number', description: 'Optional size of the returned page in characters. Default ' + DEFAULT_MAX_CHARS + ', at most ' + MAX_CHARS + '.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string', required: true, description: 'The page: a status line, then the messages.' },
+        },
+      },
+      render(args, value) { return [{ type: 'text', text: (value as { text: string }).text }] },
+    },
+    async execute(args, exec) {
+      const agent = agentOf(exec)
+      if (!agent) throw new Error('no agent session available for this call')
+      const spillStore = resolveService(agent, 'spillStore') as SpillStoreLike | undefined
+      const roots = { spillRoot: spillStore ? spillRootOf(spillStore) : null, storeDir }
+      const id = typeof args.archive === 'string' ? args.archive.trim() : ''
+      if (!id) {
+        const nodes = await readSurfaceNodes(agent)
+        if (nodes === null) throw new Error('sessionQuery service is not available in this runtime')
+        const ids = referencedIds(nodes.map((n) => JSON.stringify(n)).join('\n'))
+        if (!ids.length) return { text: 'No checkpoint in this conversation references an archive.' }
+        const lines: string[] = []
+        for (const ref of ids.slice(0, 50)) {
+          try {
+            const { text } = await trunkArchive.read(ref, roots)
+            lines.push('- ' + ref + ': ' + splitBlocks(text).length + ' messages, ' + text.length + ' characters')
+          } catch (e) {
+            lines.push('- ' + ref + ': unavailable (' + (e instanceof Error ? e.message : String(e)) + ')')
+          }
+        }
+        return { text: ids.length + ' archive(s) referenced by checkpoints in this conversation, oldest first:\n' + lines.join('\n') }
+      }
+      const { text, path } = await trunkArchive.read(id, roots)
+      return {
+        text: renderRecall(id, text, path, {
+          query: typeof args.query === 'string' ? args.query : undefined,
+          offset: typeof args.offset === 'number' ? args.offset : undefined,
+          maxChars: typeof args.maxChars === 'number' ? args.maxChars : undefined,
+        }),
+      }
     },
   })))
 
