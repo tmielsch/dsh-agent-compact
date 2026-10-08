@@ -8,6 +8,7 @@
 
 import { normText } from './normalize.js'
 import { nodeFlatText } from './surface-text.js'
+import { anchorForm, anchorItems, callNames, isSelfResult, messageTiers, modelViewText, resultTiers, type AnchorItem } from './anchor.js'
 import type { SurfaceNode } from './optimizer.js'
 
 interface SurfaceNodeErrorData {
@@ -47,15 +48,6 @@ export function preview(text: unknown, max: number): string {
   return t.length <= max ? t : t.slice(0, max) + '…'
 }
 
-// 宽容变体：去掉渲染器添加的 [tool-call <name>] / [tool-result] 标记。
-function strippedText(s: string): string {
-  return normText(
-    s
-      .replace(/\[tool-call\s+[^\]]*\]\s*/g, '')
-      .replace(/\[tool-result(?:\s+error)?\]\s*/g, ''),
-  )
-}
-
 // 一个节点能否作为锚点匹配目标：只看 user/message、assistant/message；
 // tool/result 节点不参与匹配，进行中轮次的 tool-call 节点也被排除。
 // prefixHits（真正匹配）与 nearestHint（失败提示）共用同一条资格线，
@@ -68,25 +60,41 @@ function isEligibleAnchorNode(nodes: SurfaceNode[], i: number): boolean {
 }
 
 // 唯一前缀匹配：锚点必须是恰好一个消息节点的归一化前缀，避免静默替换错节点。
+// Fork: matched in tiers against what the model saw (see src/anchor.ts); the first
+// tier is the rule above, so anchors that matched before resolve unchanged. Tool
+// results are tried last, and never those of context_compact / context_recall,
+// whose results echo the anchor.
 export function prefixHits(nodes: SurfaceNode[], anchor: string): number[] {
-  const a = normText(anchor)
-  const hits: number[] = []
-  for (let i = 0; i < nodes.length; i++) {
-    if (!isEligibleAnchorNode(nodes, i)) continue
-    const node = nodes[i]
-    const n = normText(nodeText(node, true))
-    const s = strippedText(nodeText(node, true))
-    if (n.startsWith(a) || s.startsWith(a)) hits.push(i)
+  const f = anchorForm(anchor)
+  if (!f.n) return []
+  const cache = new Map<number, AnchorItem[]>()
+  const items = (i: number): AnchorItem[] => {
+    let it = cache.get(i)
+    if (!it) cache.set(i, (it = anchorItems(nodes[i])))
+    return it
   }
-  return hits
+  const messages = nodes.map((_, i) => i).filter((i) => isEligibleAnchorNode(nodes, i))
+  for (const tier of messageTiers(f)) {
+    const hits = messages.filter((i) => tier(items(i)))
+    if (hits.length) return hits
+  }
+  const names = callNames(nodes)
+  const results = nodes.map((_, i) => i).filter((i) => nodes[i].type === 'tool/result' && !isSelfResult(nodes[i], names))
+  for (const tier of resultTiers(f)) {
+    const hits = results.filter((i) => tier(items(i)))
+    if (hits.length) return hits
+  }
+  return []
 }
 
 // AMBIGUOUS 候选的预览：checkpoint 消息共享 dsh-compaction-basic 注入的固定
 // 前缀（preamble + `<compacted-summary>` 标签）时，直接截前 80 字会让预览
 // 完全一样。先跳过候选共享的最长公共前缀再截，让预览从真正分叉处开始。
 function hitPreview(nodes: SurfaceNode[], hits: number[]): string {
-  const texts = hits.map((i) => nodeText(nodes[i], true))
-  const shared = hits.length > 1 ? commonPrefixLen(texts) : 0
+  const texts = hits.map((i) => modelViewText(nodes[i]))
+  // Fork: elide only whole words, so a quoted preview (`(sha256:…`) stays copyable.
+  const raw = hits.length > 1 ? commonPrefixLen(texts) : 0
+  const shared = raw > 0 ? texts[0].slice(0, raw).search(/\s\S*$/) + 1 : 0
   return hits.map((i, k) => nodeSummaryLine(nodes, i, shared, texts[k])).join('\n')
 }
 
@@ -106,7 +114,7 @@ function commonPrefixLen(texts: string[]): number {
 // 匹配失败提示复用的单行摘要：`pos <下标> | seq <序号> | <类型>: <前 80 字预览>`。
 // skip>0 时表示与其它候选共享的前缀已被跳过，预览从分叉点开始（并标注跳过量）。
 function nodeSummaryLine(nodes: SurfaceNode[], i: number, skip?: number, text?: string): string {
-  const full = text ?? nodeText(nodes[i], true)
+  const full = text ?? modelViewText(nodes[i])
   const shown = skip ? full.slice(skip) : full
   const tag = skip ? ' (shared ' + skip + '-char prefix elided)' : ''
   return 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + nodes[i].type + tag + ': ' + preview(shown, 80)
@@ -153,7 +161,7 @@ export function resolveUniqueHit(nodes: SurfaceNode[], anchor: string, side: str
     const hint = nearestHint(nodes, normText(anchor))
     throw new Error(side + ' not found on the surface: ' + preview(anchor, 120) + (hint ? '\nclosest nodes:\n' + hint : ''))
   }
-  throw new Error(side + ' is AMBIGUOUS: ' + hits.length + ' nodes start with it. Lengthen the anchor to pick one:\n' + hitPreview(nodes, hits))
+  throw new Error(side + ' is AMBIGUOUS: ' + hits.length + ' nodes start with it. Lengthen the anchor to pick one (for an attached image, quote its full handle with the sha256 id); when the candidates read the same, anchor a neighbouring message instead:\n' + hitPreview(nodes, hits))
 }
 
 export function snapStartBalanced(nodes: SurfaceNode[], si: number): number {

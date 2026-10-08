@@ -91,6 +91,17 @@ A checkpoint is lossy by design. This fork keeps the original behind every check
 - **`context_recall`** reads an archive back: page by page (`offset`, `maxChars`, default 20,000 characters), or only the messages that contain every word of `query`. Offsets count from 0. A message too long for the room left is cut; with a `query` the excerpt is taken around the first match, and a later match still gets an excerpt while at least 600 characters are free. Without `archive` it lists the archives the conversation's checkpoints reference. The result is an ordinary tool result at the end of the conversation, so nothing before it changes and a prefix-caching engine keeps its cache. Putting the original back in place of the checkpoint would refill the context and make the engine read the whole conversation again; recall does neither.
 - Archiving never blocks a compaction: when the raw span cannot be kept, the checkpoint simply carries no reference. `autoArchive: false` turns archiving and references off.
 
+## Anchors as the model saw them (fork extension)
+
+The model quotes anchors from its own view of the transcript, which is not the plain node text: an attached image reaches it as a handle line (`Image "grafik.png" (sha256:…); request preview …`), a team message starts with a header line before the body, and tool calls are remembered by their marker or by an argument. Anchors are therefore matched in tiers, and the first tier with hits wins:
+
+1. the previous rule: the opening of the message's plain text (an anchor that resolved before still resolves to the same message and never becomes ambiguous);
+2. the model's view of the opening: attachment handle lines (the id may be shortened to its first characters), tool-call markers in any case, the opening of a tool call's string argument;
+3. the opening of a later block of the message (the body after a team-message header, a tool call after a text block);
+4. tiers 1–3 ignoring whitespace (JSON spacing of quoted tool calls).
+
+Only when no message matches is the opening of a tool result accepted; the span edge then snaps to the call that produced it. Calls and results of `context_compact` and `context_recall` never match, because they echo anchors. A match must still be unique. Hints in the error messages show the model's view too, including each attachment's id, and the shared-prefix elision of ambiguous candidates stops at a word boundary, so a quoted preview is itself an anchor that resolves. Replayed against a real session's seven failed calls, four resolve now and three report AMBIGUOUS with previews that tell the candidates apart; an anchor quoting text the model never wrote as a message is still not found.
+
 This fork also declares no `@deepseek-ai/*` runtime package except `schemastery` as a dependency (they resolve from the DSH installation), drops the `prepare` build script so a packed tarball installs without a build, and moves the persistent spill root to `$DSH_HOME/storages/spill`.
 
 ## Compatibility
