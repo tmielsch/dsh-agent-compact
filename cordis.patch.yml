@@ -4,14 +4,24 @@
 # 可选配置：
 #   config:
 #     autoArchive: true
+#     sharedStoreDir: <dir>   # shared-trunk memo + fork registry; '' = memory only
+#     trunkGuard: true        # guard automatic compaction in forked sessions
 #
-# 该工具把 agent 编写的检查点交给主机压缩引擎；自动压缩与 /compact 保持官方行为。
+# 该工具把 agent 编写的检查点交给主机压缩引擎；/compact 保持官方行为。
+# Shared-trunk fork: forked sessions never compact their inherited trunk alone;
+# the trunk is compacted once into a content-addressed checkpoint that every
+# sibling reuses byte for byte (see README, "Shared trunk").
 - insert:
     - id: tool-context-compression
       name: '@mimichunterz/agent-compact'
+      config:
+        sharedStoreDir: !!js dshHomePath('storages', 'agent-compact')
 
-# 原始区间归档的持久 spill 根目录（$DSH_HOME/spill/...）；官方默认是进程级
-# 临时目录。bundle 层先于 profile 的 cordis.patch.yml 应用，部署方仍可覆盖。
+# 原始区间归档的持久 spill 根目录；官方默认是进程级临时目录。
+# This fork keeps the archives under $DSH_HOME/storages/spill instead of
+# $DSH_HOME/spill, because storages/ is runtime data that configuration
+# repositories of DSH_HOME usually ignore. bundle 层先于 profile 的
+# cordis.patch.yml 应用，部署方仍可覆盖。
 - id: spill-local
   config:
-    root: !!js dshHomePath('spill')
+    root: !!js dshHomePath('storages', 'spill')
