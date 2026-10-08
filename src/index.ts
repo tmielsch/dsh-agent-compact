@@ -11,11 +11,14 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import Schema from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { createShadowUserMessage } from './shadow-message.js'
-import { patchEngine } from './optimizer.js'
+import { effectiveCut, patchEngine, planTrunk, runTrunkCompaction } from './optimizer.js'
 import { normText } from './normalize.js'
 import { CtxSurfaceService } from './ctx-surface.js'
 import { resolveBoundaries, soleToolCall, spanText } from './boundary.js'
-import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode } from './optimizer.js'
+import { ForkRegistry, SharedTrunkMemo } from './memo.js'
+import { forkCut, forkParent, lockedSpanError, surfaceEvents } from './trunk.js'
+import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode, TrunkDeps } from './optimizer.js'
+import type { TrunkSessionLike } from './trunk.js'
 
 export const name = 'tool-context-compression'
 
@@ -24,11 +27,15 @@ export const inject = ['tools', 'systemPrompt']
 export interface Config {
   autoArchive: boolean
   volumeNudgeTokens: number
+  sharedStoreDir: string
+  trunkGuard: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
   autoArchive: Schema.boolean().default(true).description('context_compact saves the full raw span to a spill artifact before replacing it.'),
   volumeNudgeTokens: Schema.number().default(50000).description('Every time accumulated tool-result output (heuristic token count) since the last compaction crosses another multiple of this amount, remind the model to consider context_compact. Set to 0 to disable.'),
+  sharedStoreDir: Schema.string().default('').description('Directory for the shared-trunk memo (content-addressed trunk checkpoints) and the fork registry. Empty keeps both in memory only, so they do not survive a restart.'),
+  trunkGuard: Schema.boolean().default(true).description('Guard automatic compaction in forked sessions (and in parents with known forks): a range reaching into the inherited trunk becomes the shared trunk compaction, or is clamped to start after it.'),
 })
 
 export function apply(ctx: Context, config: Config) {
@@ -36,6 +43,18 @@ export function apply(ctx: Context, config: Config) {
   // 时可能尚未挂载，此时捕获会让 context_compact 工具失效。
   const tools = ctx.get('tools')
   if (!tools) throw new Error('@mimichunterz/agent-compact: tools service unavailable')
+
+  // ---- Shared trunk: memo, fork registry and the engine patch's dependencies ----
+  const storeDir = typeof config.sharedStoreDir === 'string' && config.sharedStoreDir.trim() ? config.sharedStoreDir.trim() : null
+  const logWarn = (msg: string) => ctx.logger.warn('%s', msg)
+  const memo = new SharedTrunkMemo(storeDir, logWarn)
+  const registry = new ForkRegistry(storeDir, logWarn)
+  const trunkDeps: TrunkDeps = {
+    memo,
+    registry,
+    guard: config.trunkGuard !== false,
+    log: (level, msg) => (level === 'warn' ? ctx.logger.warn('%s', msg) : ctx.logger.info('%s', msg)),
+  }
 
   // 为浏览器「上下文」面板注册 ctxSurface 服务（`ctxSurface/read`）。
   new CtxSurfaceService(ctx)
@@ -243,7 +262,7 @@ export function apply(ctx: Context, config: Config) {
     disposers.push(systemPrompt.section({
       name: 'tool:context_compact',
       order: 118,
-      text: 'Use the context_compact tool to proactively externalize conversation spans that have served their purpose, the way a smart human memory keeps what matters and lets go of the rest — routine memory hygiene, not a last resort. Compress only a span whose information a summary fully covers for the rest of the conversation; if verbatim detail may still be needed, leave it. The tool replaces only the span you select: compress in segments by sub-task/module: when a single sub-task has consumed a big share of the surface and reaches a conclusion, compact that module\'s span in chunks before moving on — never accumulate separate dead spans into one giant compression. Compress large outputs (log queries, big file reads) as soon as they are read and digested. Evaluate whenever a span has been used up, not only at topic boundaries, and never compress the opening, the in-flight task, or the active instruction; preserve exact paths, commands, IDs, and the user\'s requirements in the checkpoint.',
+      text: 'Use the context_compact tool to proactively externalize conversation spans that have served their purpose, the way a smart human memory keeps what matters and lets go of the rest — routine memory hygiene, not a last resort. Compress only a span whose information a summary fully covers for the rest of the conversation; if verbatim detail may still be needed, leave it. The tool replaces only the span you select: compress in segments by sub-task/module: when a single sub-task has consumed a big share of the surface and reaches a conclusion, compact that module\'s span in chunks before moving on — never accumulate separate dead spans into one giant compression. Compress large outputs (log queries, big file reads) as soon as they are read and digested. Evaluate whenever a span has been used up, not only at topic boundaries, and never compress the opening, the in-flight task, or the active instruction; preserve exact paths, commands, IDs, and the user\'s requirements in the checkpoint. Forked sessions: when this session was forked from another (a teammate or subagent created as a fork) or has forks of its own, the inherited history is a trunk shared with them, and the inference engine reuses its prompt cache only while that trunk stays byte-identical everywhere. Never compact a span inside that trunk with the default scope; when the trunk itself must shrink, call context_compact with scope "trunk", which compacts the whole inherited trunk into one shared checkpoint that every sibling reuses byte for byte.',
     }))
   }
 
@@ -257,6 +276,43 @@ export function apply(ctx: Context, config: Config) {
       /* 忽略 */
     }
   }))
+
+  // Shared trunk: learn which fork points each parent handed out, from the
+  // children's own session headers (durable: the registry persists them).
+  disposers.push(ctx.on('session/event', (session: SessionLike | undefined) => {
+    try {
+      const s = session as (SessionLike & TrunkSessionLike) | undefined
+      if (!s || registry.seen(s.id)) return
+      const parent = forkParent(s)
+      if (!parent) return
+      void registry.record(parent, s.id, forkCut(s))
+    } catch (e) {
+      /* ignore: the registry is an optimization */
+    }
+  }))
+
+  // Shared trunk: patch the compaction engine as soon as an agent exists, so the
+  // automatic compaction path is guarded before it first runs. The engine may
+  // live in a preset realm, hence the per-agent resolution.
+  const patchFor = (agent: AgentLike | undefined) => {
+    try {
+      if (!agent) return
+      const engine = resolveService(agent, 'compaction') as OptimizedEngineLike | undefined
+      if (engine) patchEngine(engine, trunkDeps)
+    } catch (e) {
+      ctx.logger.warn('[context_compact] could not patch the compaction engine: %s', e instanceof Error ? e.message : String(e))
+    }
+  }
+  disposers.push(ctx.on('agent/created', (payload) => {
+    patchFor(payload ? (payload.agent as unknown as AgentLike) : undefined)
+    return undefined
+  }))
+  try {
+    const agentsService = ctx.get('agents') as { list?: () => Iterable<AgentLike> } | undefined
+    if (agentsService && typeof agentsService.list === 'function') for (const agent of agentsService.list()) patchFor(agent)
+  } catch (e) {
+    /* agents service not mounted yet: agent/created covers later agents */
+  }
 
   // 通过 systemPrompt.context() 注入尾部实时提示：仅在增长跨过整数倍的那几步
   // 写入 KV 缓存（文本不变时是完全的 no-op），独立于自动引擎的压力阈值。
@@ -292,11 +348,12 @@ export function apply(ctx: Context, config: Config) {
 
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span is archived to a spill artifact, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: ① Progress — compact each finished step at its topic boundary, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown, terse bullets, ## sections; keep exact paths/commands/IDs and the user\'s requirements and direction. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; checkpoint must be smaller than the compressed span; edges snap to balanced tool-call/result boundaries.',
+    description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span is archived to a spill artifact, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: ① Progress — compact each finished step at its topic boundary, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown, terse bullets, ## sections; keep exact paths/commands/IDs and the user\'s requirements and direction. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; checkpoint must be smaller than the compressed span; edges snap to balanced tool-call/result boundaries. Shared trunk: in a forked session (or one with forks of its own) the inherited history is shared with the other forks; a default-scope span may not start inside it. scope "trunk" compacts exactly that inherited trunk — no anchors, no summary — into one checkpoint that is generated once and reused byte for byte by every sibling, keeping the shared prompt cache intact.',
     parameters: {
+      scope: { type: 'string', enum: ['span', 'trunk'], description: 'Optional. "span" (default) compacts the span between the anchors with your summary. "trunk" compacts the whole history this forked session shares with its siblings or forks into the shared checkpoint; startAnchor, endAnchor and summary are ignored.' },
       startAnchor: { type: 'string', description: 'Verbatim opening of the span\'s first message. Required for a middle span; omitting starts at the conversation\'s first message, discarding opening requirements and direction — only for compressing all history up to endAnchor or rebaselining.' },
-      endAnchor: { type: 'string', description: 'Verbatim opening of the span\'s last message; required. This node is replaced — pass its predecessor\'s opening to keep it.' },
-      summary: { type: 'string', description: 'Required. The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; must be smaller than the compressed content.' },
+      endAnchor: { type: 'string', description: 'Verbatim opening of the span\'s last message; required for scope "span". This node is replaced — pass its predecessor\'s opening to keep it.' },
+      summary: { type: 'string', description: 'Required for scope "span". The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; must be smaller than the compressed content.' },
     },
     output: {
       // 显式声明真实字段（而非开放的 additionalProperties:true 空对象），
@@ -322,6 +379,15 @@ export function apply(ctx: Context, config: Config) {
             description: 'Archive record when the raw span was saved, or null when it was not.',
           },
           archiveError: { type: 'string', description: 'Present only when autoArchive was requested but archiving failed; compaction still succeeded.' },
+          sharedTrunk: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              key: { type: 'string', required: true, description: 'Content address of the inherited trunk.' },
+              reused: { type: 'boolean', required: true, description: 'True when the checkpoint already existed (written by a sibling) and was reused byte for byte.' },
+            },
+            description: 'Present only for scope "trunk".',
+          },
         },
       },
       render(args, value) { return [{ type: 'text', text: JSON.stringify(value) }] },
@@ -329,43 +395,85 @@ export function apply(ctx: Context, config: Config) {
     async execute(args, exec) {
       const agent = agentOf(exec)
       if (!agent) throw new Error('no agent session available for this call')
-      if (typeof args.summary !== 'string' || !args.summary.trim()) {
+      const rawScope = args.scope as unknown
+      const scope = rawScope === undefined || rawScope === null || rawScope === '' ? 'span' : rawScope
+      if (scope !== 'span' && scope !== 'trunk') throw new Error('scope must be "span" or "trunk"')
+      if (scope === 'span' && (typeof args.summary !== 'string' || !args.summary.trim())) {
         throw new Error('summary is REQUIRED: write the Markdown checkpoint yourself (this tool makes no LLM summarizer call)')
       }
       const engine = resolveService(agent, 'compaction') as CompactionLike | undefined
       if (!engine) throw new Error('compaction service is not available in this runtime (tried host plane and preset realm)')
-      patchEngine(engine as unknown as OptimizedEngineLike)
+      patchEngine(engine as unknown as OptimizedEngineLike, trunkDeps)
       const nodes = await readSurfaceNodes(agent)
       if (nodes === null) throw new Error('sessionQuery service is not available in this runtime')
-      const b = resolveBoundaries(nodes, args)
-      const startSeq = b.startSeq
-      const endSeq = b.endSeq
-      // 把 agent 编写的检查点交给引擎；被修补的 summarizer 消费它（一次性）
-      // 并完全跳过 LLM 调用。
-      {
+      const session = agent.session as SessionLike & TrunkSessionLike
+      const cut = await effectiveCut(session, registry)
+
+      let si: number
+      let ei: number
+      let startSeq: number
+      let endSeq: number
+      let trunkPlan: ReturnType<typeof planTrunk> = null
+      let trunkReused = false
+      if (scope === 'trunk') {
+        if (!(cut > 0)) {
+          throw new Error('scope "trunk" applies only to a forked session (a teammate or subagent created as a fork) or to a session with known forks of its own; this session has no inherited trunk. Use the default scope with startAnchor, endAnchor and summary.')
+        }
+        trunkPlan = planTrunk(session, cut)
+        if (!trunkPlan) {
+          throw new Error('the inherited trunk is already compacted into the shared checkpoint; nothing is left to compact there. Compact your own later spans with the default scope.')
+        }
+        startSeq = trunkPlan.startSeq
+        endSeq = trunkPlan.endSeq
+        si = nodes.findIndex((n) => n.seq === startSeq)
+        ei = nodes.findIndex((n) => n.seq === endSeq)
+      } else {
+        const b = resolveBoundaries(nodes, args)
+        si = b.si
+        ei = b.ei
+        startSeq = b.startSeq
+        endSeq = b.endSeq
+        // Shared trunk lock: a default-scope span must start after the protected prefix.
+        if (cut > 0) {
+          const locked = lockedSpanError(surfaceEvents(session), cut, startSeq)
+          if (locked) throw new Error(locked)
+        }
+        // 把 agent 编写的检查点交给引擎；被修补的 summarizer 消费它（一次性）
+        // 并完全跳过 LLM 调用。
         const ext = ((engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary ??= {})
-        ext[agent.session.id] = args.summary
+        ext[agent.session.id] = args.summary as string
       }
 
       const spillStore = resolveService(agent, 'spillStore') as SpillStoreLike | undefined
       let archived: SurfaceArchive | null = null
       let archiveError: JsonValue | null = null
-      if (config.autoArchive && spillStore) {
+      if (config.autoArchive && spillStore && si >= 0 && ei >= si) {
         try {
-          archived = await archiveSpan(agent, spillStore, nodes, b.si, b.ei)
+          archived = await archiveSpan(agent, spillStore, nodes, si, ei)
         } catch (err) {
           archiveError = err && (err as Error).message ? (err as Error).message : String(err)
         }
       } else if (config.autoArchive) {
-        archiveError = 'spillStore unavailable; raw copy not saved (compaction still proceeds)'
+        archiveError = spillStore ? 'span not found on the read surface; raw copy not saved (compaction still proceeds)' : 'spillStore unavailable; raw copy not saved (compaction still proceeds)'
       }
 
       let result: CompactionResultLike
       try {
-        result = await engine.compactRegion(startSeq, endSeq, agent, exec.signal)
+        result = trunkPlan
+          ? await runTrunkCompaction(engine as unknown as OptimizedEngineLike, agent, trunkPlan, exec.signal) as CompactionResultLike
+          : await engine.compactRegion(startSeq, endSeq, agent, exec.signal)
       } catch (err) {
         const msg = err && (err as Error).message ? (err as Error).message : String(err)
+        // Never leave a one-shot summary behind for a later, unrelated compaction.
+        const ext = (engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary
+        if (ext) delete ext[agent.session.id]
         throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg)
+      }
+      if (trunkPlan) {
+        // Decide "reused" from the stored entry's origin: with concurrent siblings
+        // a pre-check cannot tell who generated the text.
+        const entry = await memo.get(trunkPlan.key)
+        trunkReused = !!entry && entry.origin.sessionId !== agent.session.id
       }
       const usage = findSummaryUsage(agent.session, result.compactionId)
       // 成对清理：检查点是单独注入的，为避免检查点文本在 surface 出现两次，
@@ -404,7 +512,9 @@ export function apply(ctx: Context, config: Config) {
                   const freedText = result.shadowedTokenCount !== undefined && result.shadowedTokenCount !== null
                     ? '; freed ~' + String(result.shadowedTokenCount) + ' tokens'
                     : ''
-                  const doneText = '`context_compact` done: checkpoint above' + freedText + (locText
+                  const doneText = (trunkPlan
+                    ? '`context_compact` scope "trunk" done: the inherited trunk is now the shared checkpoint above (' + (trunkReused ? 'reused byte for byte from a sibling' : 'generated here; siblings will reuse it byte for byte') + '); do not call scope "trunk" again'
+                    : '`context_compact` done: checkpoint above') + freedText + (locText
                     ? '; raw span archived at ' + locText + '.'
                     : '; raw span not archived.')
                   session.append('user/message', createShadowUserMessage(doneText), {
@@ -431,11 +541,12 @@ export function apply(ctx: Context, config: Config) {
         }
       }
       // 调试指标只进日志，不进入模型可见的工具结果。
-      ctx.logger.info('[context_compact] %s span %d..%d (%s), shadowed %d nodes / %s tokens, surface %d -> after, usage=%o', agent.session.id, startSeq, endSeq, b.method, Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0, String(result.shadowedTokenCount ?? '?'), nodes.length, usage)
+      ctx.logger.info('[context_compact] %s %s %d..%d, shadowed %d nodes / %s tokens, surface %d -> after, usage=%o', agent.session.id, trunkPlan ? 'shared trunk' : 'span', startSeq, endSeq, Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0, String(result.shadowedTokenCount ?? '?'), nodes.length, usage)
       const out: {
         ok: boolean
         archived: { locator: JsonValue; retrievalHint: JsonValue } | null
         archiveError?: string
+        sharedTrunk?: { key: string; reused: boolean }
       } = {
         ok: true,
         archived: archived ? {
@@ -444,6 +555,7 @@ export function apply(ctx: Context, config: Config) {
         } : null,
       }
       if (archiveError) out.archiveError = typeof archiveError === 'string' ? archiveError : String(archiveError)
+      if (trunkPlan) out.sharedTrunk = { key: trunkPlan.key, reused: trunkReused }
       return out
     },
   })))
