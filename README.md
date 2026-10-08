@@ -76,6 +76,8 @@ This fork adds one rule set for sessions that were **forked** — teammates or s
 
 Not covered: the manual `/compact` command keeps the stock behaviour, and forks taken at different points of the parent's history have different trunks, so they share a checkpoint only with forks taken at the same point.
 
+Measured limits outside this plugin (DSH 0.2.0-rc.2): a fork inherits only the parent's *completed* turns, so a compaction the parent ran in its still-open turn is not part of the trunk. And the parent's own system prompt can differ from its forks' (a Team Lead's prompt carries the Agent Teams section that subagent forks do not get), so a parent and its forks may not share a prefix at all; siblings always do, and that is what this extension guarantees.
+
 | field | default | meaning |
 |---|---|---|
 | `sharedStoreDir` | `''` (bundle patch: `$DSH_HOME/storages/agent-compact`) | memo and fork registry directory; empty keeps both in memory only |

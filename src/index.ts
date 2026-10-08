@@ -427,7 +427,6 @@ export function apply(ctx: Context, config: Config) {
         endSeq = trunkPlan.endSeq
         si = nodes.findIndex((n) => n.seq === startSeq)
         ei = nodes.findIndex((n) => n.seq === endSeq)
-        trunkReused = (await memo.get(trunkPlan.key)) !== null
       } else {
         const b = resolveBoundaries(nodes, args)
         si = b.si
@@ -470,6 +469,12 @@ export function apply(ctx: Context, config: Config) {
         if (ext) delete ext[agent.session.id]
         throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg)
       }
+      if (trunkPlan) {
+        // Decide "reused" from the stored entry's origin: with concurrent siblings
+        // a pre-check cannot tell who generated the text.
+        const entry = await memo.get(trunkPlan.key)
+        trunkReused = !!entry && entry.origin.sessionId !== agent.session.id
+      }
       const usage = findSummaryUsage(agent.session, result.compactionId)
       // 成对清理：检查点是单独注入的，为避免检查点文本在 surface 出现两次，
       // 将该 tool-call 的 assistant/message 与其 tool/result 各 shadow 为一个
@@ -507,7 +512,9 @@ export function apply(ctx: Context, config: Config) {
                   const freedText = result.shadowedTokenCount !== undefined && result.shadowedTokenCount !== null
                     ? '; freed ~' + String(result.shadowedTokenCount) + ' tokens'
                     : ''
-                  const doneText = '`context_compact` done: checkpoint above' + freedText + (locText
+                  const doneText = (trunkPlan
+                    ? '`context_compact` scope "trunk" done: the inherited trunk is now the shared checkpoint above (' + (trunkReused ? 'reused byte for byte from a sibling' : 'generated here; siblings will reuse it byte for byte') + '); do not call scope "trunk" again'
+                    : '`context_compact` done: checkpoint above') + freedText + (locText
                     ? '; raw span archived at ' + locText + '.'
                     : '; raw span not archived.')
                   session.append('user/message', createShadowUserMessage(doneText), {
