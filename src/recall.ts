@@ -57,6 +57,16 @@ export function trunkArchiveId(key: string): string {
   return 'trunk:' + key
 }
 
+/**
+ * The archive a stored trunk checkpoint references: its own trunk id when the footer is
+ * there, null for an entry written before recall existed. Never searched for in the
+ * text, because the summary may quote other references (or a placeholder) before it.
+ */
+export function trunkRecallId(key: string, blocks: readonly string[]): string | null {
+  const own = trunkArchiveId(key)
+  return blocks.some((b) => b.includes(footerText(own))) ? own : null
+}
+
 /** The id of a spill-store file, or null when it does not live under the spill root. */
 export function spanArchiveId(spillRoot: string | null, locator: unknown): string | null {
   if (!spillRoot || typeof locator !== 'string' || !isAbsolute(locator)) return null
@@ -153,11 +163,47 @@ export interface RecallOptions {
 
 export const DEFAULT_MAX_CHARS = 20000
 export const MAX_CHARS = 60000
+/** A match that does not fit is still shown as an excerpt when at least this much room is left. */
+const MIN_EXCERPT = 600
+
+/** Earliest position of any query word in the body (after the header line), or -1. */
+function firstHit(text: string, words: string[], from: number): number {
+  const lower = text.toLowerCase()
+  let best = -1
+  for (const w of words) {
+    const p = lower.indexOf(w, from)
+    if (p >= 0 && (best < 0 || p < best)) best = p
+  }
+  return best
+}
+
+/**
+ * Cut a message to `room` characters: the header line always, then the start of the
+ * body, or with a query a window around the first match (a third of it before the match).
+ */
+function excerpt(text: string, room: number, words: string[], path: string | null): string {
+  const nl = text.indexOf('\n')
+  const headEnd = nl < 0 ? text.length : nl + 1
+  const head = text.slice(0, headEnd)
+  const where = path ? '; read ' + path + ' with offset/limit for the rest' : ''
+  // Leave room for the two marker lines, so the page stays within maxChars.
+  const window = Math.max(200, room - head.length - 120 - where.length)
+  const hit = words.length ? firstHit(text, words, headEnd) : -1
+  let start = headEnd
+  if (hit >= 0) start = Math.max(headEnd, Math.min(hit - Math.floor(window / 3), text.length - window))
+  const end = Math.min(text.length, start + window)
+  const before = start - headEnd
+  const after = text.length - end
+  return head
+    + (before > 0 ? '[... ' + before + ' characters of this message before]\n' : '')
+    + text.slice(start, end)
+    + (after > 0 ? '\n[... ' + after + ' more characters of this message' + where + ']' : '')
+}
 
 /**
  * Render a bounded page of an archive: messages in order, or only those that
  * contain every word of `query` (case-insensitive). The first line says what
- * was returned and the offset that continues it.
+ * was returned and the offset that continues it; offsets count from 0.
  */
 export function renderRecall(id: string, archive: string, path: string | null, opts: RecallOptions = {}): string {
   const all = splitBlocks(archive)
@@ -176,15 +222,18 @@ export function renderRecall(id: string, archive: string, path: string | null, o
       used += b.text.length + 2
       continue
     }
-    if (parts.length === 0) {
-      // A single message larger than the page: show its start and say where the rest is.
-      parts.push(b.text.slice(0, room) + '\n[... ' + (b.text.length - room) + ' more characters of this message' + (path ? '; read ' + path + ' with offset/limit for the rest' : '') + ']')
+    // A message larger than the room left: the first one on a page is always shown cut;
+    // with a query a later match is shown cut too while a useful excerpt still fits.
+    if (parts.length === 0 || (words.length > 0 && room >= MIN_EXCERPT)) {
+      parts.push(excerpt(b.text, room, words, path))
       i++
     }
     break
   }
   const what = words.length ? list.length + ' of ' + all.length + ' messages match "' + opts.query + '"' : all.length + ' messages'
-  const shown = parts.length ? 'showing ' + (words.length ? 'matches' : 'messages') + ' ' + offset + '-' + (i - 1) : 'nothing at offset ' + offset
+  const shown = parts.length
+    ? 'showing ' + (words.length ? 'matches' : 'messages') + ' at offset ' + offset + (i - 1 > offset ? '-' + (i - 1) : '')
+    : 'nothing at offset ' + offset
   const more = i < list.length ? 'more: offset ' + i : 'end of archive'
   return 'archive ' + id + ': ' + what + '; ' + shown + '; ' + more + (path ? '; file ' + path : '') + '\n\n' + parts.join('\n\n')
 }

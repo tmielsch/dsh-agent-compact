@@ -17,7 +17,7 @@ import { CtxSurfaceService } from './ctx-surface.js'
 import { resolveBoundaries, soleToolCall, spanText } from './boundary.js'
 import { ForkRegistry, SharedTrunkMemo } from './memo.js'
 import { forkCut, forkParent, lockedSpanError, surfaceEvents } from './trunk.js'
-import { DEFAULT_MAX_CHARS, MAX_CHARS, TrunkArchive, referencedIds, renderRecall, spanArchiveId, splitBlocks } from './recall.js'
+import { DEFAULT_MAX_CHARS, MAX_CHARS, TrunkArchive, referencedIds, renderRecall, spanArchiveId, splitBlocks, trunkRecallId } from './recall.js'
 import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode, TrunkDeps } from './optimizer.js'
 import type { TrunkSessionLike } from './trunk.js'
 
@@ -511,8 +511,8 @@ export function apply(ctx: Context, config: Config) {
         // a pre-check cannot tell who generated the text.
         const entry = await memo.get(trunkPlan.key)
         trunkReused = !!entry && entry.origin.sessionId !== agent.session.id
-        // The archive the shared checkpoint really references (none for an entry written before recall existed).
-        recallId = entry ? referencedIds(entry.blocks.join('\n'))[0] ?? null : null
+        // The trunk archive id follows from the key (see trunkRecallId).
+        recallId = entry ? trunkRecallId(trunkPlan.key, entry.blocks) : null
       }
       const usage = findSummaryUsage(agent.session, result.compactionId)
       // 成对清理：检查点是单独注入的，为避免检查点文本在 surface 出现两次，
