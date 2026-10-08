@@ -64,6 +64,25 @@ Pass through the inserted row in the profile's `cordis.patch.yml` or a bundle pa
 - **Restart-safe sequential archives**: the next number is derived by scanning the session's spill directory (`max+1`) — gap-free; the backend's random hex prefix makes filename collisions impossible.
 - **Paired cleanup**: the tool-call message (carrying the full `summary` argument) and its tool/result are each replaced by one tiny shadow message, so the checkpoint text never appears twice on the surface (skipped when the message holds more than one tool call).
 
+## Shared trunk (fork extension)
+
+This fork adds one rule set for sessions that were **forked** — teammates or subagents created with `fork`, which start with a verbatim copy of their parent's history. That inherited history is the *trunk*. A prefix-caching inference engine (llama.cpp prompt cache, Strata conversation checkpoints, provider prompt caching) reads the trunk once for all forks, but only while it stays byte-identical in every one of them. Upstream agent-compact lets every fork compact the trunk on its own, so each fork writes a different checkpoint and the shared prefix is lost.
+
+- **Lock.** In a forked session, a default-scope `context_compact` span may not start inside the trunk (the inherited nodes, plus any checkpoint that replaced inherited nodes). The error names the first message the session owns.
+- **One canonical trunk block.** `context_compact({ scope: "trunk" })` compacts exactly the trunk — from the first non-system node through the last inherited node — without anchors and without an agent-written summary.
+- **Content-addressed checkpoint.** The trunk's identity is a SHA-256 over the inherited events (`lib/trunk.js`, `trunkKey`). The first fork that compacts a trunk generates the checkpoint with the stock summarizer, which sees only the system prompt and the trunk, so the text is task-neutral. Every other fork with the same key — and the parent, see below — gets the exact same text blocks back. Concurrent requests share one generation; a failed generation is not remembered. Entries persist under `sharedStoreDir` (`$DSH_HOME/storages/agent-compact/trunk/<key>.json`).
+- **Automatic compaction is guarded.** The engine's `compactRegion()` is wrapped: an automatic (pressure or overflow) range that reaches into the trunk first becomes the shared trunk compaction; once the trunk is compacted, later ranges are clamped to start after the shared checkpoint. If neither is possible, the requested range runs unchanged, because a session that cannot shrink must still recover. `trunkGuard: false` turns the guard off.
+- **Parents stay aligned.** Fork points are recorded per parent (`storages/agent-compact/forks/<parent>.json`, read from the children's session headers). A parent with known forks protects the most recent fork point the same way, so when the Team Lead compacts its old history it lands the same trunk checkpoint as its teammates.
+
+Not covered: the manual `/compact` command keeps the stock behaviour, and forks taken at different points of the parent's history have different trunks, so they share a checkpoint only with forks taken at the same point.
+
+| field | default | meaning |
+|---|---|---|
+| `sharedStoreDir` | `''` (bundle patch: `$DSH_HOME/storages/agent-compact`) | memo and fork registry directory; empty keeps both in memory only |
+| `trunkGuard` | `true` | guard the automatic compaction path as described above |
+
+This fork also declares no `@deepseek-ai/*` runtime package except `schemastery` as a dependency (they resolve from the DSH installation), drops the `prepare` build script so a packed tarball installs without a build, and moves the persistent spill root to `$DSH_HOME/storages/spill`.
+
 ## Compatibility
 
 - Built and verified against DeepSeek Harness `0.2.0-rc.2` (`@deepseek-ai/dsh-compaction-basic@0.2.0-rc.2`, cordis `4.0.4`, schemastery `3.18.4`).
