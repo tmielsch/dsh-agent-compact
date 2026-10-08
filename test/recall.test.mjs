@@ -29,6 +29,9 @@ test('footer: appended once, found again in plain and JSON-escaped text', () => 
   assert.equal(withFooter(t, 'trunk:' + KEY), t, 'idempotent')
   assert.deepEqual(referencedIds(t + '\n' + t), ['trunk:' + KEY])
   assert.deepEqual(referencedIds(JSON.stringify({ text: t })), ['trunk:' + KEY])
+  // A checkpoint that quotes the footer with a placeholder is prose, not a reference.
+  const span = 'session-2cf2a25e95ea/cc7ce0e8f447-000003'
+  assert.deepEqual(referencedIds(footerText('<id>') + ' ' + footerText('…') + ' ' + footerText(span)), [span])
   assert.deepEqual(blocksWithFooter(['a', 'b'], 'x'), ['a', 'b\n\n' + footerText('x')])
   assert.deepEqual(blocksWithFooter([], 'x'), [footerText('x')])
   assert.deepEqual(blocksWithFooter(['a'], null), ['a'])

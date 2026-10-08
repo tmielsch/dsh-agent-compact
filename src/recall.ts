@@ -36,10 +36,20 @@ export function withFooter(text: string, id: string): string {
   return text.replace(/\s+$/, '') + '\n\n' + footer
 }
 
-/** Archive ids referenced in a text, in order of first appearance. */
+/** Whether an id has the shape of a span or trunk archive id. */
+export function isArchiveId(id: string): boolean {
+  return SPAN_ID.test(id) || TRUNK_ID.test(id)
+}
+
+/**
+ * Archive ids referenced in a text, in order of first appearance. Only well-formed ids
+ * count: a checkpoint that quotes the footer with a placeholder (`archive="<id>"`) is prose.
+ */
 export function referencedIds(text: string): string[] {
   const out: string[] = []
-  for (const m of text.matchAll(FOOTER_RE)) if (!out.includes(m[1])) out.push(m[1])
+  for (const m of text.matchAll(FOOTER_RE)) {
+    if (isArchiveId(m[1]) && !out.includes(m[1])) out.push(m[1])
+  }
   return out
 }
 
