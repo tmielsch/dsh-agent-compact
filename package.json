@@ -1,6 +1,6 @@
 {
   "name": "@mimichunterz/agent-compact",
-  "version": "0.2.1-trunk.4",
+  "version": "0.2.1-trunk.5",
   "description": "Context compression tool (context_compact) with a shared-trunk extension: the agent writes span checkpoints itself, forked team members never compact their inherited trunk on their own, and the trunk is compacted once into a content-addressed checkpoint every sibling reuses byte for byte, so inference-engine prefix caches stay shared; every checkpoint keeps its original for context_recall.",
   "type": "module",
   "main": "./lib/index.js",

@@ -42,11 +42,11 @@ function assistantMultiToolCallNode(seq, ids) {
   }
 }
 
-function toolResultNode(seq, text, isError) {
+function toolResultNode(seq, text, isError, callId) {
   return {
     seq,
     type: 'tool/result',
-    data: { message: { content: [{ type: 'tool-result', isError: !!isError, content: [{ type: 'text', text }] }] } },
+    data: { message: { ...(callId ? { toolCallId: callId } : {}), content: [{ type: 'tool-result', isError: !!isError, content: [{ type: 'text', text }] }] } },
   }
 }
 
@@ -189,7 +189,9 @@ test('resolveBoundaries: unmatched-anchor hint never recommends a tool/result or
     // 逐字回带了锚点文本本身——旧的 nearestHint 不区分节点类型，词重叠算法
     // 会把它当成"最接近"的候选推荐回来，纯属自我循环、毫无信息量。
     assistantToolCallNode(2, 'call-1', 'context_compact', '{"endAnchor":"please fix the login zzz"}'),
-    toolResultNode(3, 'please fix the login zzz result text'),
+    // Its result (linked by call id, as real results are) echoes the anchor too: the
+    // tool-result fallback must never pick a context_compact result.
+    toolResultNode(3, 'please fix the login zzz result text', false, 'call-1'),
   ]
   let message = ''
   try {
