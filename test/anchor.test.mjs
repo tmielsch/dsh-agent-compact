@@ -5,7 +5,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { resolveBoundaries, prefixHits } from '../lib/boundary.js'
-import { stripHandles } from '../lib/anchor.js'
+import { stripHandles, toolNameSegments } from '../lib/anchor.js'
 
 const IMG_A = 'sha256:1c9be60e6d716067cf2869145f6cb4aaa1b1d5507246737286b99455f0575020'
 const IMG_B = 'sha256:456754a2e290c9fce18f869b306b5f855858b0547155a16d8aa8379838e14b99'
@@ -108,4 +108,43 @@ test('hints show the model view: an ambiguous image anchor lists each handle wit
   assert.match(message, /AMBIGUOUS: 2 nodes/)
   assert.match(message, /seq 2 .*456754a2/)
   assert.match(message, /seq 9 .*1c9be60e/)
+})
+
+// ---- Namespaced tool calls (2026-10-10) ----
+// Das Modell zitiert einen Aufruf mit verkuerztem Namen: der Hinweis druckt
+// `[tool-call mcp__houdini__execute_python] …`, das Modell schreibt
+// `[tool-call execute_python]`. Der Anker muss trotzdem treffen.
+
+test('anchor: a shortened tool-call marker matches the namespaced call', () => {
+  const node = {
+    seq: 258,
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'tool-call', id: 'c1', name: 'mcp__houdini__execute_python', arguments: '{"code":"import hou"}' }] } },
+  }
+  // Ein abschliessender Knoten mit Werkzeugaufruf ist bewusst kein Ankerziel
+  // (der Zug laeuft noch), deshalb steht hier eine Nachricht dahinter.
+  const after = { seq: 259, type: 'user/message', data: { content: [{ type: 'text', text: 'weiter' }] } }
+  const nodes = [node, after]
+  assert.deepEqual(prefixHits(nodes, '[tool-call execute_python]'), [0])
+  assert.deepEqual(prefixHits(nodes, '[tool-call mcp__houdini__execute_python'), [0])
+  assert.deepEqual(prefixHits(nodes, '[tool-call MCP__houdini__execute_python]'), [0])
+})
+
+test('anchor: the shortened marker never matches a different tool', () => {
+  const node = {
+    seq: 1,
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{"command":"ls"}' }] } },
+  }
+  assert.deepEqual(prefixHits([node], '[tool-call execute_python]'), [])
+})
+
+test('anchor: two calls of the same shortened name stay AMBIGUOUS instead of silently picking one', () => {
+  const nodes = [
+    { seq: 1, type: 'assistant/message', data: { message: { content: [{ type: 'tool-call', id: 'a', name: 'mcp__houdini__execute_python', arguments: '{"code":"x"}' }] } } },
+    { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'tool-call', id: 'b', name: 'mcp__houdini__execute_python', arguments: '{"code":"y"}' }] } } },
+    { seq: 3, type: 'user/message', data: { content: [{ type: 'text', text: 'weiter' }] } },
+  ]
+  assert.equal(prefixHits(nodes, '[tool-call execute_python]').length, 2)
+  assert.equal(toolNameSegments('mcp__houdini__execute_python').includes('executepython'), true)
 })

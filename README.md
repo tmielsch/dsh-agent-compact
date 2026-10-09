@@ -96,13 +96,15 @@ A checkpoint is lossy by design. This fork keeps the original behind every check
 The model quotes anchors from its own view of the transcript, which is not the plain node text: an attached image reaches it as a handle line (`Image "grafik.png" (sha256:…); request preview …`), a team message starts with a header line before the body, and tool calls are remembered by their marker or by an argument. Anchors are therefore matched in tiers, and the first tier with hits wins:
 
 1. the previous rule: the opening of the message's plain text (an anchor that resolved before still resolves to the same message and never becomes ambiguous);
-2. the model's view of the opening: attachment handle lines (the id may be shortened to its first characters), tool-call markers in any case, the opening of a tool call's string argument;
+2. the model's view of the opening: attachment handle lines (the id may be shortened to its first characters), tool-call markers in any case, the opening of a tool call's string argument, a tool-call marker whose tool name is shortened to one `__`-separated segment;
 3. the opening of a later block of the message (the body after a team-message header, a tool call after a text block);
 4. tiers 1–3 ignoring whitespace (JSON spacing of quoted tool calls).
 
 Only when no message matches is the opening of a tool result accepted; the span edge then snaps to the call that produced it. Calls and results of `context_compact` and `context_recall` never match, because they echo anchors. A match must still be unique. Hints in the error messages show the model's view too, including each attachment's id, and the shared-prefix elision of ambiguous candidates stops at a word boundary, so a quoted preview is itself an anchor that resolves. Replayed against a real session's seven failed calls, four resolve now and three report AMBIGUOUS with previews that tell the candidates apart; an anchor quoting text the model never wrote as a message is still not found.
 
 When nothing is found, the error now says why it may be unfindable and shows what to quote instead: text that stood only in the model's own reasoning is not on the surface and can never be an anchor, the "closest nodes" list skips the harness's own notices (runtime-context snapshots, compaction reminders, checkpoints), and a *last messages on the surface* list gives the tail with copyable openings. Before, a model that had quoted its own reasoning got three unrelated system notices back and retried the same anchor — which is what a real session did seven times in a row.
+
+A namespaced tool call had one more trap. The hints print the call as `[tool-call mcp__houdini__execute_python] …`, and the model, quoting that same call back, wrote `[tool-call execute_python]` — the namespace was gone. One real session therefore reported *not found* for an anchor that named a call present on the surface twice over. A leading `[tool-call …]` marker is now compared against the whole tool name and against each `__`-separated segment, so the shortened form resolves to the same call. Two calls that differ only in namespace still report AMBIGUOUS instead of silently picking one. Replayed against the real session that hit this, the anchor now resolves to the same span the model intended (seq 82…260).
 
 ## Reasoning stays out (fork extension)
 
