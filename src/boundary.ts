@@ -31,10 +31,20 @@ export function soleToolCall(n: SurfaceNode, callId: string): boolean {
 }
 
 // skipReasoning：让锚点匹配文本与模型所见对齐（跳过 reasoning 与图片块）；
-// 归档（skipReasoning = false）保留完整原文，reasoning 与图片标记都保留。
+// 传入 false 时保留完整原文，reasoning 与图片标记都保留。
 export function nodeText(n: SurfaceNode, skipReasoning?: boolean): string {
   const skip = skipReasoning ?? false
   return nodeFlatText(n, { skipReasoning: skip, dropImages: skip })
+}
+
+// Fork: 归档文本（spanText / 共享 trunk 的原文）跳过 reasoning，但保留图片标记。
+// Zwei Gründe: Die Denkspur hilft beim Wiedereinstieg nicht — sie erklärt nur, wie
+// jemand auf einen Gedanken kam —, und sie ist die Textklasse, auf die der
+// Anfragefilter von Anthropic reagiert. Ein Archiv ist eine wörtliche Sammlung von
+// Modellausgaben; je weniger Denkspur darin steht, desto harmloser die Anfrage.
+// Siehe README, Abschnitt „Denkspuren bleiben draußen“.
+export function nodeArchiveText(n: SurfaceNode): string {
+  return nodeFlatText(n, { skipReasoning: true, dropImages: false })
 }
 
 export function nodeErrorTag(n: SurfaceNode): string {
@@ -141,10 +151,20 @@ function anchorOverlap(nodeRaw: string, anchorNorm: string): number {
   return hit / words.length
 }
 
+// Fork: Der Harness hängt an jeden Zug eigene Hinweise („Current runtime context“,
+// die Verdichtungs-Erinnerung, den Checkpoint-Text). Sie sind formal Nachrichten,
+// als Anker aber wertlos — und sie waren im Fehlerfall die einzigen „closest nodes“,
+// die angezeigt wurden, obwohl das Modell sie nie als Anker wählen wollte.
+const HARNESS_NOTICE_RE = /^(<system-reminder>|Current runtime context\.|`context_compact` (reminder|done|result)|This is an automatically generated checkpoint|A skill is a reusable set|`context_compact` done)/
+
+function isHarnessNotice(n: SurfaceNode): boolean {
+  return HARNESS_NOTICE_RE.test(modelViewText(n).trimStart())
+}
+
 function nearestHint(nodes: SurfaceNode[], anchorNorm: string): string {
   const scored = nodes
     .map((_, i) => i)
-    .filter((i) => isEligibleAnchorNode(nodes, i))
+    .filter((i) => isEligibleAnchorNode(nodes, i) && !isHarnessNotice(nodes[i]))
     .map((i) => ({ i: i, score: anchorOverlap(nodeText(nodes[i], true), anchorNorm) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 3)
@@ -153,13 +173,30 @@ function nearestHint(nodes: SurfaceNode[], anchorNorm: string): string {
   return scored.map((s) => nodeSummaryLine(nodes, s.i)).join('\n')
 }
 
+// Fork: Das Ende des Verlaufs ist der Anker, den ein Modell fast immer meint —
+// „verdichte bis hierher“. Die letzten Nachrichten wörtlich zu zeigen ist deshalb
+// hilfreicher als jede Ähnlichkeitssuche, und der Text ist direkt kopierbar.
+function tailHint(nodes: SurfaceNode[], count = 6): string {
+  const idx = nodes
+    .map((_, i) => i)
+    .filter((i) => isEligibleAnchorNode(nodes, i) && !isHarnessNotice(nodes[i]))
+    .slice(-count)
+  return idx.map((i) => nodeSummaryLine(nodes, i, 0, modelViewText(nodes[i]).replace(/\s+/g, ' '))).join('\n')
+}
+
 // 将单个锚点解析为唯一节点下标，解析失败时抛出带有可操作提示的错误。
 export function resolveUniqueHit(nodes: SurfaceNode[], anchor: string, side: string): number {
   const hits = prefixHits(nodes, anchor)
   if (hits.length === 1) return hits[0]
   if (hits.length === 0) {
     const hint = nearestHint(nodes, normText(anchor))
-    throw new Error(side + ' not found on the surface: ' + preview(anchor, 120) + (hint ? '\nclosest nodes:\n' + hint : ''))
+    const tail = tailHint(nodes)
+    throw new Error(
+      side + ' not found on the surface: ' + preview(anchor, 120) +
+        '\nOnly what was actually exchanged is on the surface. Text that stood only in your own reasoning/thinking is NOT on the surface and can never be an anchor — pick the opening words of a visible message instead (its text, a tool call with its arguments, or a team message’s body).' +
+        (hint ? '\nclosest nodes (by wording):\n' + hint : '') +
+        (tail ? '\nlast messages on the surface (copy the opening words of one):\n' + tail : ''),
+    )
   }
   throw new Error(side + ' is AMBIGUOUS: ' + hits.length + ' nodes start with it. Lengthen the anchor to pick one (for an attached image, quote its full handle with the sha256 id); when the candidates read the same, anchor a neighbouring message instead:\n' + hitPreview(nodes, hits))
 }
@@ -234,11 +271,12 @@ export function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: un
   }
 }
 
-export function spanText(nodes: SurfaceNode[], si: number, ei: number): string {
+export function spanText(nodes: SurfaceNode[], si: number, ei: number, archive = true): string {
   const parts: string[] = []
   for (let i = si; i <= ei; i++) {
     const n = nodes[i]
-    parts.push('--- seq ' + n.seq + ' | pos ' + i + ' | ' + n.type + nodeErrorTag(n) + ' ---\n' + nodeText(n))
+    const body = archive ? nodeArchiveText(n) : nodeText(n)
+    parts.push('--- seq ' + n.seq + ' | pos ' + i + ' | ' + n.type + nodeErrorTag(n) + ' ---\n' + body)
   }
   return parts.join('\n\n')
 }

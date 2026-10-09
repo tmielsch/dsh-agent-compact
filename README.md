@@ -102,6 +102,19 @@ The model quotes anchors from its own view of the transcript, which is not the p
 
 Only when no message matches is the opening of a tool result accepted; the span edge then snaps to the call that produced it. Calls and results of `context_compact` and `context_recall` never match, because they echo anchors. A match must still be unique. Hints in the error messages show the model's view too, including each attachment's id, and the shared-prefix elision of ambiguous candidates stops at a word boundary, so a quoted preview is itself an anchor that resolves. Replayed against a real session's seven failed calls, four resolve now and three report AMBIGUOUS with previews that tell the candidates apart; an anchor quoting text the model never wrote as a message is still not found.
 
+When nothing is found, the error now says why it may be unfindable and shows what to quote instead: text that stood only in the model's own reasoning is not on the surface and can never be an anchor, the "closest nodes" list skips the harness's own notices (runtime-context snapshots, compaction reminders, checkpoints), and a *last messages on the surface* list gives the tail with copyable openings. Before, a model that had quoted its own reasoning got three unrelated system notices back and retried the same anchor — which is what a real session did seven times in a row.
+
+## Reasoning stays out (fork extension)
+
+Every checkpoint and every archive this plugin writes leaves the model's reasoning trace out. Two reasons: a reasoning trace is useless on re-entry — it explains how someone arrived at a thought, not what was decided — and it is the text class Anthropic's request filter reacts to. On 2026-10-09 two long sessions on `claude-opus-5-5` were answered with
+
+```
+This request was blocked as it seems to violate Anthropic's Terms of Service
+restrictions on reverse engineering or duplicating model outputs.
+```
+
+after a compaction failure loop, and the sessions had to switch provider to continue. DSH sends the reasoning of earlier assistant messages along on every request (`dsh-llm-pi-ai`, `replayedAssistant` with signatures and `foreignAssistant` without), so a long agentic session accumulates a large corpus of verbatim model reasoning. Archives are exactly such a corpus; they now hold the visible text, the tool calls with their arguments, and image markers, but not the reasoning. Older archives written before this version still contain it — read them back sparingly, or let them age out.
+
 This fork also declares no `@deepseek-ai/*` runtime package except `schemastery` as a dependency (they resolve from the DSH installation), drops the `prepare` build script so a packed tarball installs without a build, and moves the persistent spill root to `$DSH_HOME/storages/spill`.
 
 ## Compatibility
