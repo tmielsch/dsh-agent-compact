@@ -227,3 +227,70 @@ test('spanText: renders every node with its seq/pos/type header and keeps full t
   assert.match(text, /--- seq 5 \| pos 0 \| user\/message ---\nstep done/)
   assert.match(text, /--- seq 6 \| pos 1 \| assistant\/message ---\nacknowledged/)
 })
+
+// ---- Fork: Denkspur und Anker-Hinweise (Anthropic-Sperre, 2026-10-09) ----
+
+function assistantReasoningNode(seq, reasoning, text) {
+  const content = [{ type: 'reasoning', text: reasoning }]
+  if (text) content.push({ type: 'text', text })
+  return { seq, type: 'assistant/message', data: { message: { content } } }
+}
+
+test('spanText: archives keep the visible text and drop the reasoning trace', () => {
+  const nodes = [
+    userNode(1, 'bitte bauen'),
+    assistantReasoningNode(2, 'GEHEIME DENKSPUR: erst pruefen, dann bauen', 'Ich baue den kleinsten Schritt.'),
+  ]
+  const text = spanText(nodes, 0, 1)
+  assert.match(text, /Ich baue den kleinsten Schritt\./)
+  assert.doesNotMatch(text, /GEHEIME DENKSPUR/)
+})
+
+test('spanText: reasoning stays out of the archive byte-for-byte, images keep their marker', () => {
+  const nodes = [
+    { seq: 1, type: 'assistant/message', data: { message: { content: [
+      { type: 'reasoning', text: 'nur gedacht' },
+      { type: 'image' },
+      { type: 'text', text: 'sichtbar' },
+    ] } } },
+  ]
+  const text = spanText(nodes, 0, 0)
+  assert.match(text, /\[image\]/)
+  assert.match(text, /sichtbar/)
+  assert.doesNotMatch(text, /nur gedacht/)
+})
+
+test('resolveBoundaries: a not-found anchor names the reasoning trap and shows the tail', () => {
+  const nodes = [
+    userNode(1, 'erste Aufgabe'),
+    assistantReasoningNode(2, 'Die Gegenprobe trennt sauber', 'Fertig, ich lese jetzt Perforce.'),
+    userNode(3, 'weiter'),
+  ]
+  let message = ''
+  try {
+    resolveBoundaries(nodes, { startAnchor: 'erste Aufgabe', endAnchor: 'Die Gegenprobe trennt sauber' })
+  } catch (err) {
+    message = err.message
+  }
+  assert.match(message, /not found on the surface/)
+  assert.match(message, /reasoning/)
+  assert.match(message, /last messages on the surface/)
+  assert.match(message, /Fertig, ich lese jetzt Perforce\./)
+})
+
+test('resolveBoundaries: harness notices are never offered as anchor candidates', () => {
+  const notice = 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.'
+  const nodes = [
+    userNode(1, notice),
+    userNode(2, 'Die Leseliste ist durchgearbeitet.'),
+  ]
+  let notFound = ''
+  try {
+    resolveBoundaries(nodes, { startAnchor: 'etwas voellig anderes', endAnchor: 'Die Leseliste ist durchgearbeitet.' })
+  } catch (err) {
+    notFound = err.message
+  }
+  assert.match(notFound, /not found on the surface/)
+  assert.doesNotMatch(notFound, /runtime context/)
+  assert.match(notFound, /Die Leseliste ist durchgearbeitet\./)
+})
