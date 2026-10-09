@@ -164,6 +164,32 @@ export function modelViewText(n: SurfaceNode): string {
   return textFrom(anchorItems(n), 0, true, Infinity).replace(/\n+$/, '')
 }
 
+/** The `[tool-call name]` marker the hints print, at the very start of an anchor. */
+const MARKER_AT_START = /^\[tool-call\s+([^\]]*)\]/i
+
+/** Case- and punctuation-insensitive form of a tool name (`mcp__houdini__execute-python` → `mcphoudiniexecutepython`). */
+function nameKey(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+/**
+ * Every reading of one tool name: the whole name and each `__`-separated segment.
+ *
+ * A model that quotes a namespaced call routinely drops the namespace:
+ * `mcp__houdini__execute_python` is remembered and written as `execute_python`.
+ * The segments are the readings that still identify the same call.
+ */
+export function toolNameSegments(name: string): string[] {
+  const out = new Set<string>()
+  const whole = nameKey(name)
+  if (whole) out.add(whole)
+  for (const part of name.split('__')) {
+    const key = nameKey(part)
+    if (key) out.add(key)
+  }
+  return [...out]
+}
+
 /** An anchor in every reading the tiers compare. */
 export interface AnchorForm {
   /** normalized anchor */
@@ -177,12 +203,23 @@ export interface AnchorForm {
   restS: string
   /** how much node text a prefix comparison needs (whitespace collapses, so with margin) */
   cap: number
+  /** the tool name a leading `[tool-call …]` marker quotes, in comparison form ('' = no marker) */
+  markerName: string
 }
 
 export function anchorForm(anchor: string): AnchorForm {
   const n = normText(anchor)
   const { ids, rest } = stripHandles(n)
-  return { n, s: strippedText(anchor), ids, restN: normText(rest), restS: strippedText(rest), cap: anchor.length * 4 + 4000 }
+  const marker = MARKER_AT_START.exec(n.trimStart())
+  return {
+    n,
+    s: strippedText(anchor),
+    ids,
+    restN: normText(rest),
+    restS: strippedText(rest),
+    cap: anchor.length * 4 + 4000,
+    markerName: marker ? nameKey(marker[1]) : '',
+  }
 }
 
 const startsWith = (text: string, prefix: string): boolean => prefix.length > 0 && text.startsWith(prefix)
@@ -225,6 +262,15 @@ function matchAt(items: AnchorItem[], k: number, f: AnchorForm, L: (s: string) =
   // The opening of a string argument of a tool call.
   if (it?.kind === 'call') {
     for (const v of it.values ?? []) if (startsWith(L(normText(v)), an)) return true
+  }
+  // The anchor quotes the call with `[tool-call …]`, but with a shortened tool
+  // name: the model drops the namespace (`execute_python` for
+  // `mcp__houdini__execute_python`), or writes it without the prefix at all.
+  // Joining this reading is exactly what makes such an anchor hit.
+  if (f.markerName && it?.kind === 'call') {
+    for (const seg of toolNameSegments(it.name ?? '')) {
+      if (seg === f.markerName) return true
+    }
   }
   return false
 }
