@@ -2,6 +2,12 @@
 
 English · [简体中文](README.zh-CN.md)
 
+> **This is the `tmielsch` fork.** It adds the extensions described below —
+> shared trunk, recall, anchors as the model saw them, reasoning hygiene,
+> conservative expert checkpoints — on top of
+> [MimicHunterZ/dsh-agent-compact](https://github.com/MimicHunterZ/dsh-agent-compact).
+> Install it from the release tarball; see [Install](#install).
+
 Context compression for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): lets the **agent autonomously call** `context_compact` to compress a span of the conversation it chooses — the finished, no-longer-needed middle — and replace it with a checkpoint the agent writes itself.
 
 ## Why
@@ -24,8 +30,31 @@ The tool call itself happens inside the agent's normal turn and is billed like a
 
 ## Install
 
+This fork is installed from its own release tarball — one line, no registry
+account, no checkout:
+
 ```sh
-# from a published registry package
+dsh plugin --profile web add https://github.com/tmielsch/dsh-agent-compact/releases/download/v0.2.1-trunk.9/mimichunterz-agent-compact-0.2.1-trunk.9.tgz
+```
+
+Replace the version in both places with the one you want
+([all releases](https://github.com/tmielsch/dsh-agent-compact/releases)); the
+lockfile then pins that exact tarball's checksum, so an update is the same line
+with the new version.
+
+Requirements: DeepSeek Harness `0.2.0-rc.2` or a compatible build. The package
+declares the harness packages it plugs into as **peer** dependencies and
+installs none of them itself — they resolve from the DSH installation. That
+matters: a second copy of `@deepseek-ai/*` inside the profile makes every tool
+call die with `Cannot read properties of undefined (reading 'prepare')`. Only
+`zod` comes along as a real dependency. If your pnpm reports missing peers, do
+**not** answer that with `pnpm add @deepseek-ai/...`; add
+`peerDependencyRules.ignoreMissing: ['@deepseek-ai/*']` to the profile's
+`pnpm-workspace.yaml` instead (the same rule the maintainer's other machines
+use).
+
+```sh
+# from a published registry package (upstream's own name)
 dsh plugin --profile web add @mimichunterz/agent-compact
 
 # or from a local checkout
@@ -34,7 +63,7 @@ dsh plugin --profile web add ./agent-compact
 
 `dsh plugin` forwards to pnpm in the profile directory and appends the bundle to `dsh.profile.bundles` (see the official [publish guide](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)). **Restart the profile** — every session then sees the `context_compact` tool.
 
-The bundle's own `cordis.patch.yml` pins the spill archive root to `~/.dsh/spill` (deployments can override it again through the profile's `cordis.patch.yml`).
+The bundle's own `cordis.patch.yml` pins the spill archive root to `~/.dsh/spill` (deployments can override it again through the profile's `cordis.patch.yml`). The shared-trunk memo and the archives of recalled spans land under `$DSH_HOME/storages/` (`agent-compact/`, `spill/`).
 
 ## Uninstall
 
@@ -117,11 +146,11 @@ restrictions on reverse engineering or duplicating model outputs.
 
 after a compaction failure loop, and the sessions had to switch provider to continue. DSH sends the reasoning of earlier assistant messages along on every request (`dsh-llm-pi-ai`, `replayedAssistant` with signatures and `foreignAssistant` without), so a long agentic session accumulates a large corpus of verbatim model reasoning. Archives are exactly such a corpus; they now hold the visible text, the tool calls with their arguments, and image markers, but not the reasoning. Older archives written before this version still contain it — read them back sparingly, or let them age out.
 
-This fork also declares no `@deepseek-ai/*` runtime package except `schemastery` as a dependency (they resolve from the DSH installation), drops the `prepare` build script so a packed tarball installs without a build, and moves the persistent spill root to `$DSH_HOME/storages/spill`.
+This fork declares **no `@deepseek-ai/*` package as a runtime dependency**: they are peer dependencies and resolve from the DSH installation, so installing this plugin never plants a second copy of the harness in a profile. `zod` is the only real dependency. It also drops the `prepare` build script (a packed tarball installs without a build) and moves the persistent spill root to `$DSH_HOME/storages/spill`.
 
 ## Compatibility
 
-- Built and verified against DeepSeek Harness `0.2.0-rc.2` (`@deepseek-ai/dsh-compaction-basic@0.2.0-rc.2`, cordis `4.0.4`, schemastery `3.18.4`).
+- Built and verified against DeepSeek Harness `0.2.0-rc.2` (`@deepseek-ai/dsh-compaction-basic@0.2.0-rc.2`, cordis `4.0.4`, schemastery `3.18.4`). Verified by a clean-room install into an empty `DSH_HOME`: the profile then contains only `@mimichunterz/agent-compact` and `zod`, `dsh --profile web --dump-config` mounts the bundle, and `dsh web` boots (HTTP 401 on the port, no startup diagnostics).
 - 0.2 migration notes: `MessageSourceMap` dropped the shared `plugin` kind, so shadow messages now declare the plugin-owned `agent-compact` source; `SurfaceOp` replace uses `startSeq`/`endSeq` (was `start`/`end`); strict `TypertCodec` takes `create()` instead of a prebuilt `schema`; `JsonValue` moved from `dsh-tools`/`dsh-session` to `@deepseek-ai/dsh-util-values`; `dsh.client.inject` lists Client **packages** (it previously held service names).
 - Only **one compaction per session at a time** (the engine transaction is serialized); anchors re-resolve on every call, so later compactions never go stale after earlier checkpoints replaced old nodes.
 - With a local spill backend the root is fixed; other backends degrade gracefully (no `root` field → in-memory counter), and compaction itself is unaffected.
