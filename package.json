@@ -1,7 +1,7 @@
 {
   "name": "@mimichunterz/agent-compact",
-  "version": "0.2.1-trunk.8",
-  "description": "Context compression tool (context_compact) with a shared-trunk extension: the agent writes span checkpoints itself, forked team members never compact their inherited trunk on their own, and the trunk is compacted once into a content-addressed checkpoint every sibling reuses byte for byte, so inference-engine prefix caches stay shared; every checkpoint keeps its original for context_recall.",
+  "version": "0.2.1-trunk.9",
+  "description": "tmielsch fork of agent-compact: context compression for DeepSeek Harness where the agent writes its own span checkpoints, plus shared-trunk compaction for forked team members (byte-identical checkpoints, prefix caches stay shared), context_recall for the original behind every checkpoint, anchors matched against what the model actually saw, and reasoning kept out of archives and requests.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
@@ -59,14 +59,14 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "~3.18.4",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-compaction-basic": "0.2.0-rc.2",
     "@deepseek-ai/dsh-llm": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "^0.2.0-rc.2",
-    "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.4"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
