@@ -1,12 +1,26 @@
-# agent-compact
+# rolling-compaction
 
 English · [简体中文](README.zh-CN.md)
 
-> **This is the `tmielsch` fork.** It adds the extensions described below —
-> shared trunk, recall, anchors as the model saw them, reasoning hygiene,
-> conservative expert checkpoints — on top of
-> [MimicHunterZ/dsh-agent-compact](https://github.com/MimicHunterZ/dsh-agent-compact).
-> Install it from the release tarball; see [Install](#install).
+> **`@tmielsch/rolling-compaction`** is the `tmielsch` fork of
+> [agent-compact](https://github.com/MimicHunterZ/dsh-agent-compact) (MIT). It
+> adds the extensions described below — shared trunk, recall, anchors as the
+> model saw them, reasoning hygiene, conservative expert checkpoints — and is
+> installed from its own release tarball; see [Install](#install).
+>
+> The package name is deliberately not `agent-compact`: it can be installed next
+> to the upstream package without the two colliding under one name, and the name
+> says what the fork adds — compaction that **rolls forward**. Each checkpoint
+> only ever replaces a finished span, keeps its original for recall, and in a
+> forked session every sibling reuses the *same* checkpoint text, so a
+> prefix-caching inference engine keeps reading one shared prefix instead of
+> re-reading a different one per agent.
+>
+> Inside the plugin, the stable identifiers stay as they are: the shadow-message
+> source kind `agent-compact`, the trunk key version `agent-compact/shared-trunk/v1`
+> and the store path `$DSH_HOME/storages/agent-compact`. Renaming them would
+> invalidate already-written checkpoints and fork registries, so only the
+> *package* name changed.
 
 Context compression for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): lets the **agent autonomously call** `context_compact` to compress a span of the conversation it chooses — the finished, no-longer-needed middle — and replace it with a checkpoint the agent writes itself.
 
@@ -34,7 +48,7 @@ This fork is installed from its own release tarball — one line, no registry
 account, no checkout:
 
 ```sh
-dsh plugin --profile web add https://github.com/tmielsch/dsh-agent-compact/releases/download/v0.2.1-trunk.9/mimichunterz-agent-compact-0.2.1-trunk.9.tgz
+dsh plugin --profile web add https://github.com/tmielsch/dsh-agent-compact/releases/download/v0.2.1-trunk.10/rolling-compaction-0.2.1-trunk.10.tgz
 ```
 
 Replace the version in both places with the one you want
@@ -55,7 +69,7 @@ use).
 
 ```sh
 # from a published registry package (upstream's own name)
-dsh plugin --profile web add @mimichunterz/agent-compact
+dsh plugin --profile web add @tmielsch/rolling-compaction
 
 # or from a local checkout
 dsh plugin --profile web add ./agent-compact
@@ -68,7 +82,7 @@ The bundle's own `cordis.patch.yml` pins the spill archive root to `~/.dsh/spill
 ## Uninstall
 
 ```sh
-dsh plugin --profile web remove @mimichunterz/agent-compact
+dsh plugin --profile web remove @tmielsch/rolling-compaction
 ```
 
 `dsh plugin remove` forwards to `pnpm remove` in the profile directory: it uninstalls the package and reconciles the bundle out of `dsh.profile.bundles`. **Restart the profile** — every session then stops seeing the `context_compact` tool. The same package name works whether you installed from the registry or from a local checkout.
@@ -150,7 +164,7 @@ This fork declares **no `@deepseek-ai/*` package as a runtime dependency**: they
 
 ## Compatibility
 
-- Built and verified against DeepSeek Harness `0.2.0-rc.2` (`@deepseek-ai/dsh-compaction-basic@0.2.0-rc.2`, cordis `4.0.4`, schemastery `3.18.4`). Verified by a clean-room install into an empty `DSH_HOME`: the profile then contains only `@mimichunterz/agent-compact` and `zod`, `dsh --profile web --dump-config` mounts the bundle, and `dsh web` boots (HTTP 401 on the port, no startup diagnostics).
+- Built and verified against DeepSeek Harness `0.2.0-rc.2` (`@deepseek-ai/dsh-compaction-basic@0.2.0-rc.2`, cordis `4.0.4`, schemastery `3.18.4`). Verified by a clean-room install into an empty `DSH_HOME`: the profile then contains only `@tmielsch/rolling-compaction` and `zod`, `dsh --profile web --dump-config` mounts the bundle, and `dsh web` boots (HTTP 401 on the port, no startup diagnostics).
 - 0.2 migration notes: `MessageSourceMap` dropped the shared `plugin` kind, so shadow messages now declare the plugin-owned `agent-compact` source; `SurfaceOp` replace uses `startSeq`/`endSeq` (was `start`/`end`); strict `TypertCodec` takes `create()` instead of a prebuilt `schema`; `JsonValue` moved from `dsh-tools`/`dsh-session` to `@deepseek-ai/dsh-util-values`; `dsh.client.inject` lists Client **packages** (it previously held service names).
 - Only **one compaction per session at a time** (the engine transaction is serialized); anchors re-resolve on every call, so later compactions never go stale after earlier checkpoints replaced old nodes.
 - With a local spill backend the root is fixed; other backends degrade gracefully (no `root` field → in-memory counter), and compaction itself is unaffected.

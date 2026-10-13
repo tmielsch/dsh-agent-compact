@@ -1,4 +1,4 @@
-// @mimichunterz/agent-compact: 锚点 → 边界解析的纯函数核心。
+// @tmielsch/rolling-compaction: 锚点 → 边界解析的纯函数核心。
 // 从 src/index.ts 抽出：这里的一切都只是 `(nodes, args)` 的纯函数，不依赖
 // ctx、不发起任何 I/O，因此可以直接单测（见 test/boundary.test.mjs），不需要
 // 启一个真的 Cordis 会话或 mock 服务。

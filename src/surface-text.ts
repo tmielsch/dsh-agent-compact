@@ -1,4 +1,4 @@
-// @mimichunterz/agent-compact: surface 节点→文本提取的共享实现。
+// @tmielsch/rolling-compaction: surface 节点→文本提取的共享实现。
 // 锚点匹配（src/index.ts）与浏览器上下文面板（src/ctx-surface.ts）曾各自维护一份
 // 几乎相同的遍历逻辑（content 取值、block 展开、tool-call/tool-result 标记），
 // 容易在演进中悄悄漂移——统一成一份，用参数表达两处真正不同的地方：

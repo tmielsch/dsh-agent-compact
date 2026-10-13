@@ -1,4 +1,4 @@
-// @mimichunterz/agent-compact: 上下文压缩工具（bundle 插件）。
+// @tmielsch/rolling-compaction: 上下文压缩工具（bundle 插件）。
 // 注册模型可见的 context_compact 工具，并在首次使用时修补压缩引擎，
 // 使其 summarize() 尊重 agent 自行编写的检查点（参见 ./optimizer.js）。
 
@@ -43,7 +43,7 @@ export function apply(ctx: Context, config: Config) {
   // 注意：sessionQuery 与 agentPresets 必须在每次调用时解析——它们在 apply
   // 时可能尚未挂载，此时捕获会让 context_compact 工具失效。
   const tools = ctx.get('tools')
-  if (!tools) throw new Error('@mimichunterz/agent-compact: tools service unavailable')
+  if (!tools) throw new Error('@tmielsch/rolling-compaction: tools service unavailable')
 
   // ---- Shared trunk: memo, fork registry and the engine patch's dependencies ----
   const storeDir = typeof config.sharedStoreDir === 'string' && config.sharedStoreDir.trim() ? config.sharedStoreDir.trim() : null

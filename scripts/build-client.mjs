@@ -1,4 +1,4 @@
-// 为 @mimichunterz/agent-compact 构建浏览器半边 bundle lib/client.js：
+// 为 @tmielsch/rolling-compaction 构建浏览器半边 bundle lib/client.js：
 // 1. React 视图层（src/client/*.tsx）由 esbuild 打包，react 保持 external
 //    （宿主页面通过 ClientModuleSystem 提供）；
 // 2. Cordis 接线层（$mount/slots.register/apply）保持为手写模板。
@@ -61,7 +61,7 @@ const viewBundleCode = viewBuild.outputFiles[0].text
 
 // ---- 3. 头部 ----
 const head = `window.__ModuleLoader__.load({
-	id: "@mimichunterz/agent-compact",
+	id: "@tmielsch/rolling-compaction",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -73,9 +73,9 @@ const tail = `
 		//#region ctx-surface wire schemas（自 lib/ctx-surface.js 提取）
 		${schemaBlock}
 		const TYPERT_REMOTE = {
-			package: '@mimichunterz/agent-compact',
+			package: '@tmielsch/rolling-compaction',
 			descriptors: [{
-				id: '@mimichunterz/agent-compact#ctxSurface/read',
+				id: '@tmielsch/rolling-compaction#ctxSurface/read',
 				service: 'ctxSurface',
 				namespace: 'ctxSurface',
 				method: 'read',
@@ -86,13 +86,13 @@ const tail = `
 					source: 'json',
 					codec: {
 						mode: 'strict',
-						typeSymbol: '@mimichunterz/agent-compact/ctx-surface#CtxSurfaceReadRequest',
+						typeSymbol: '@tmielsch/rolling-compaction/ctx-surface#CtxSurfaceReadRequest',
 						create: () => _ctxSurface_read_request$schema,
 					},
 				}],
 				result: {
 					mode: 'strict',
-					typeSymbol: '@mimichunterz/agent-compact/ctx-surface#CtxSurfaceReadResult',
+					typeSymbol: '@tmielsch/rolling-compaction/ctx-surface#CtxSurfaceReadResult',
 					create: () => _ctxSurface_read_result$schema,
 				},
 				sourceLocation: { file: 'src/ctx-surface.ts', line: 181, column: 3 },
@@ -112,7 +112,7 @@ ${viewBundleCode}
 		const CTX_SURFACE_CSS = ctxSurfaceViewModule.CSS;
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(CSS_TAG) + "]") === null) {
 			const tag = document.createElement("style");
-			tag.dataset.plugin = "@mimichunterz/agent-compact";
+			tag.dataset.plugin = "@tmielsch/rolling-compaction";
 			tag.dataset.pluginCss = CSS_TAG;
 			tag.textContent = CTX_SURFACE_CSS;
 			document.head.appendChild(tag);

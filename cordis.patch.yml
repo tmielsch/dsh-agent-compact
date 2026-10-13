@@ -1,5 +1,5 @@
-# @mimichunterz/agent-compact bundle 层：在主机层注册上下文压缩工具（每个会话可见）。
-# 安装：dsh plugin --profile web add @mimichunterz/agent-compact
+# @tmielsch/rolling-compaction bundle 层：在主机层注册上下文压缩工具（每个会话可见）。
+# 安装：dsh plugin --profile web add @tmielsch/rolling-compaction
 #
 # 可选配置：
 #   config:
@@ -13,7 +13,7 @@
 # sibling reuses byte for byte (see README, "Shared trunk").
 - insert:
     - id: tool-context-compression
-      name: '@mimichunterz/agent-compact'
+      name: '@tmielsch/rolling-compaction'
       config:
         sharedStoreDir: !!js dshHomePath('storages', 'agent-compact')
 
