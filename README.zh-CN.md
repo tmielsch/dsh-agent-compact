@@ -26,7 +26,7 @@
 
 ```sh
 # 从发布仓库安装
-dsh plugin --profile web add @mimichunterz/agent-compact
+dsh plugin --profile web add @tmielsch/rolling-compaction
 
 # 或本地目录
 dsh plugin --profile web add ./agent-compact
@@ -39,7 +39,7 @@ dsh plugin --profile web add ./agent-compact
 ## 卸载
 
 ```sh
-dsh plugin --profile web remove @mimichunterz/agent-compact
+dsh plugin --profile web remove @tmielsch/rolling-compaction
 ```
 
 `dsh plugin remove` 在 profile 目录内转发给 `pnpm remove`:卸载包,并把 bundle 从 `dsh.profile.bundles` 中剔除。**重启 profile 后**,所有会话都不再看到 `context_compact` 工具。无论当初是从发布仓库还是本地目录安装的,卸载都用同一个包名。

@@ -1,4 +1,4 @@
-// @mimichunterz/agent-compact: ctx-surface 主机服务（Typert Remote）。
+// @tmielsch/rolling-compaction: ctx-surface 主机服务（Typert Remote）。
 // 把会话的实时模型 surface 作为类型化 Remote（`ctxSurface/read`）暴露给
 // 浏览器客户端，供「上下文」面板渲染。
 

@@ -1,4 +1,4 @@
-// @mimichunterz/agent-compact: shared optimizer core (no runtime dependencies on DSH packages).
+// @tmielsch/rolling-compaction: shared optimizer core (no runtime dependencies on DSH packages).
 //
 // patchEngine() patches the host compaction engine (BasicCompactionEngine)
 // once per engine instance:

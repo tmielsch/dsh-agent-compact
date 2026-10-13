@@ -1,4 +1,4 @@
-// @mimichunterz/agent-compact: recall of compacted spans (no runtime dependencies on DSH packages).
+// @tmielsch/rolling-compaction: recall of compacted spans (no runtime dependencies on DSH packages).
 //
 // Every compaction keeps the raw span in an archive and ends its checkpoint
 // with a reference to it, so the agent can read the original back on demand

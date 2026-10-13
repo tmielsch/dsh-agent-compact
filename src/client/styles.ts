@@ -1,4 +1,4 @@
-export const CSS_TAG = '@mimichunterz/agent-compact/ctx-surface.css'
+export const CSS_TAG = '@tmielsch/rolling-compaction/ctx-surface.css'
 
 // cxp = "ctx panel" v2。颜色值引用 --dsw-* 设计 token。注意：
 // --dsh-trajectory-bottom-clearance 需在本地定义，否则 cxpTablePane 的底部

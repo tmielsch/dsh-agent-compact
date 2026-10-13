@@ -3,12 +3,12 @@
 import { request$schema, result$schema } from './ctx-surface.js'
 
 export const TYPERT = {
-  package: '@mimichunterz/agent-compact',
+  package: '@tmielsch/rolling-compaction',
   face: 'host',
   schemas: [],
   invocations: [
     {
-      id: '@mimichunterz/agent-compact#ctxSurface/read',
+      id: '@tmielsch/rolling-compaction#ctxSurface/read',
       service: 'ctxSurface',
       namespace: 'ctxSurface',
       method: 'read',
@@ -20,7 +20,7 @@ export const TYPERT = {
           source: 'json',
           codec: {
             mode: 'strict',
-            typeSymbol: '@mimichunterz/agent-compact/ctx-surface#CtxSurfaceReadRequest',
+            typeSymbol: '@tmielsch/rolling-compaction/ctx-surface#CtxSurfaceReadRequest',
             // 0.2 的 TypertCodec（strict）由 `schema` 值改为 `create()` 惰性取 schema：
             // Gateway 的解码路径是 `codec.create().parse(value)`。
             create: () => request$schema,
@@ -29,7 +29,7 @@ export const TYPERT = {
       ],
       result: {
         mode: 'strict',
-        typeSymbol: '@mimichunterz/agent-compact/ctx-surface#CtxSurfaceReadResult',
+        typeSymbol: '@tmielsch/rolling-compaction/ctx-surface#CtxSurfaceReadResult',
         create: () => result$schema,
       },
       sourceLocation: { file: 'src/ctx-surface.ts', line: 181, column: 3 },

@@ -1,4 +1,4 @@
-// @mimichunterz/agent-compact (fork): anchor matching against what the model saw.
+// @tmielsch/rolling-compaction (fork): anchor matching against what the model saw.
 //
 // The model quotes an anchor from its own view of the transcript, which differs from
 // the plain node text the matcher used to compare:
