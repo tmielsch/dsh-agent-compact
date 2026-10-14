@@ -294,3 +294,70 @@ test('resolveBoundaries: harness notices are never offered as anchor candidates'
   assert.doesNotMatch(notFound, /runtime context/)
   assert.match(notFound, /Die Leseliste ist durchgearbeitet\./)
 })
+
+// ---- Der geschuetzte Systemkopf (2026-10-15) ----
+// Befund aus einer echten Sitzung: Der Aufruf kam ohne startAnchor, die Grenze
+// fiel damit auf Position 0 - und Position 0 hielt den Systemprompt. Der Motor
+// schrieb compaction/start und compaction/summary, die Ersetzung wurde danach
+// abgelehnt ("node 0 holds the system prompt"). Die Zusammenfassungszeile blieb
+// im Protokoll stehen, und die Sitzung liess sich nicht mehr laden.
+
+function systemNode(seq, text) {
+  return { seq, type: 'system/message', data: { message: { role: 'system', content: [{ type: 'text', text }] } } }
+}
+
+test('resolveBoundaries: ohne startAnchor beginnt der Abschnitt HINTER dem Systemkopf', () => {
+  const nodes = [
+    systemNode(8, 'You are an AI agent powered by DeepSeek Harness. Du bist der kanten-experte.'),
+    userNode(9, 'erste Aufgabe'),
+    userNode(11, 'zweite Aufgabe'),
+  ]
+  const r = resolveBoundaries(nodes, { endAnchor: 'zweite Aufgabe' })
+  assert.equal(r.startSeq, 9, 'der Systemkopf darf nie Teil des Abschnitts sein')
+  assert.match(r.method, /start=after-system/)
+})
+
+test('resolveBoundaries: ohne Systemkopf bleibt der Anfang wie bisher die erste Nachricht', () => {
+  const nodes = [userNode(1, 'erste Aufgabe'), userNode(2, 'zweite Aufgabe')]
+  const r = resolveBoundaries(nodes, { endAnchor: 'zweite Aufgabe' })
+  assert.equal(r.startSeq, 1)
+  assert.match(r.method, /start=first/)
+})
+
+test('resolveBoundaries: ein Systemknoten ist kein Ankerziel (der Kopf bleibt so oder so draussen)', () => {
+  const nodes = [
+    systemNode(8, 'You are an AI agent powered by DeepSeek Harness.'),
+    userNode(9, 'erste Aufgabe'),
+  ]
+  // Der Systemknoten ist keine Nachricht, die die Sitzung ausgetauscht hat: er
+  // wird nie gefunden. Damit kann kein Anker versehentlich den Kopf treffen.
+  assert.throws(
+    () => resolveBoundaries(nodes, { startAnchor: 'You are an AI agent', endAnchor: 'erste Aufgabe' }),
+    /not found on the surface/,
+  )
+})
+
+test('resolveBoundaries: mehrere Systemknoten am Kopf werden alle uebersprungen', () => {
+  const nodes = [
+    systemNode(8, 'Hauprompt'),
+    systemNode(20, 'zusaetzlicher Hinweis'),
+    userNode(9, 'erste Aufgabe'),
+    userNode(11, 'zweite Aufgabe'),
+  ]
+  const r = resolveBoundaries(nodes, { endAnchor: 'zweite Aufgabe' })
+  assert.equal(r.startSeq, 9)
+})
+
+test('resolveBoundaries: der Belegfall vom 15.10. kann nicht mehr passieren', () => {
+  // Echter Aufruf ohne startAnchor, endAnchor = eine Teamnachricht. Vorher
+  // begann die Spanne auf Position 0, also auf dem Systemprompt; der Harness
+  // lehnte die Ersetzung danach ab und die summary-Zeile blieb im Protokoll.
+  const nodes = [
+    systemNode(8, 'You are an AI agent powered by DeepSeek Harness. Du bist der kanten-experte.'),
+    userNode(9, 'Team message team-message-abc from lead\nAuftrag: Raender der Ziegelwand.'),
+    userNode(40, 'Zwischenstand'),
+  ]
+  const r = resolveBoundaries(nodes, { endAnchor: 'Zwischenstand' })
+  assert.equal(nodes[r.si].type, 'user/message')
+  assert.notEqual(r.si, 0)
+})

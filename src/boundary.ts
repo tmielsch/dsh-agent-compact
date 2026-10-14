@@ -223,6 +223,21 @@ export function snapEndBalanced(nodes: SurfaceNode[], ei: number): number {
   return ei
 }
 
+/**
+ * How many `system/message` nodes sit at the head of the surface.
+ *
+ * Surface node 0 holds the system prompt, and the harness protects it: a
+ * replacement covering node 0 is rejected unless it is itself a
+ * `system/message` over exactly that node (`assertSystemHeadRewrite` in
+ * dsh-session). A span must therefore never *start* on the head — the stock
+ * engine skips it the same way.
+ */
+export function systemHeadCount(nodes: SurfaceNode[]): number {
+  let i = 0
+  while (i < nodes.length && nodes[i].type === 'system/message') i++
+  return i
+}
+
 export interface BoundaryResolveResult {
   si: number
   ei: number
@@ -241,13 +256,21 @@ export function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: un
     throw new Error('cannot resolve the end boundary: provide endAnchor — verbatim text that is a UNIQUE PREFIX of the LAST node of the span to compress (that node itself is compressed; use its predecessor to keep it)')
   }
   const method: string[] = []
+  // Fork: node 0 holds the system prompt, and the harness protects it. A span
+  // that starts on it is rejected by the loader *after* the summary has been
+  // written, which leaves a compaction row behind that the session log can no
+  // longer be read with. The head is therefore never part of a span: without a
+  // startAnchor the span begins after it (the stock engine skips it the same
+  // way). An explicit anchor cannot land there anyway — system nodes are not
+  // anchor targets — so this is the one path that had to be closed.
+  const head = systemHeadCount(nodes)
   let si: number
   if (startAnchor) {
     si = resolveUniqueHit(nodes, startAnchor, 'startAnchor')
     method.push('start=anchor')
   } else {
-    si = 0
-    method.push('start=first')
+    si = head
+    method.push(head > 0 ? 'start=after-system' : 'start=first')
   }
   let ei = resolveUniqueHit(nodes, endAnchor, 'endAnchor')
   method.push('end=anchor')

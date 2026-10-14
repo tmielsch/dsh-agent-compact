@@ -178,6 +178,12 @@ function nameKey(s: string): string {
  * A model that quotes a namespaced call routinely drops the namespace:
  * `mcp__houdini__execute_python` is remembered and written as `execute_python`.
  * The segments are the readings that still identify the same call.
+ *
+ * The name alone is NOT enough to identify a call: `[tool-call Bash] …` names
+ * one of hundreds of Bash calls, and matching on the name by itself turned a
+ * precise anchor into "every node of this tool". It is therefore only ever
+ * compared together with the argument text that follows the marker (see
+ * `markerArgument`).
  */
 export function toolNameSegments(name: string): string[] {
   const out = new Set<string>()
@@ -205,6 +211,8 @@ export interface AnchorForm {
   cap: number
   /** the tool name a leading `[tool-call …]` marker quotes, in comparison form ('' = no marker) */
   markerName: string
+  /** what follows that marker in the anchor, marker- and whitespace-normalized ('' = name only) */
+  markerArgument: string
 }
 
 export function anchorForm(anchor: string): AnchorForm {
@@ -219,6 +227,7 @@ export function anchorForm(anchor: string): AnchorForm {
     restS: strippedText(rest),
     cap: anchor.length * 4 + 4000,
     markerName: marker ? nameKey(marker[1]) : '',
+    markerArgument: marker ? normText(n.trimStart().slice(marker[0].length)) : '',
   }
 }
 
@@ -266,10 +275,17 @@ function matchAt(items: AnchorItem[], k: number, f: AnchorForm, L: (s: string) =
   // The anchor quotes the call with `[tool-call …]`, but with a shortened tool
   // name: the model drops the namespace (`execute_python` for
   // `mcp__houdini__execute_python`), or writes it without the prefix at all.
-  // Joining this reading is exactly what makes such an anchor hit.
-  if (f.markerName && it?.kind === 'call') {
-    for (const seg of toolNameSegments(it.name ?? '')) {
-      if (seg === f.markerName) return true
+  //
+  // The name alone identifies nothing — it must be carried by the argument text
+  // the anchor also quotes, otherwise `[tool-call Bash] {"command":"cd …"}`
+  // would match every Bash call in the session. When the anchor stops at the
+  // marker (nothing but the name), the exact-marker rule above has already had
+  // its chance and this reading is skipped rather than turned into a flood.
+  if (f.markerName && f.markerArgument && it?.kind === 'call') {
+    const named = toolNameSegments(it.name ?? '').includes(f.markerName)
+    if (named) {
+      const argText = normText(textFrom(items, k, false, f.cap).replace(MARKER_AT_START, ''))
+      if (startsWith(argText, f.markerArgument)) return true
     }
   }
   return false

@@ -125,9 +125,12 @@ test('anchor: a shortened tool-call marker matches the namespaced call', () => {
   // (der Zug laeuft noch), deshalb steht hier eine Nachricht dahinter.
   const after = { seq: 259, type: 'user/message', data: { content: [{ type: 'text', text: 'weiter' }] } }
   const nodes = [node, after]
-  assert.deepEqual(prefixHits(nodes, '[tool-call execute_python]'), [0])
-  assert.deepEqual(prefixHits(nodes, '[tool-call mcp__houdini__execute_python'), [0])
-  assert.deepEqual(prefixHits(nodes, '[tool-call MCP__houdini__execute_python]'), [0])
+  // Der verkuerzte Name allein identifiziert nichts: der Anker muss den
+  // Argumentanfang mitzitieren, sonst traefe er jeden Aufruf dieses Werkzeugs.
+  assert.deepEqual(prefixHits(nodes, '[tool-call execute_python]'), [])
+  assert.deepEqual(prefixHits(nodes, '[tool-call execute_python] {"code":"import hou"'), [0])
+  assert.deepEqual(prefixHits(nodes, '[tool-call mcp__houdini__execute_python] {"code":"import hou"'), [0])
+  assert.deepEqual(prefixHits(nodes, '[tool-call MCP__houdini__execute_python] {"code":"import hou"'), [0])
 })
 
 test('anchor: the shortened marker never matches a different tool', () => {
@@ -145,6 +148,20 @@ test('anchor: two calls of the same shortened name stay AMBIGUOUS instead of sil
     { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'tool-call', id: 'b', name: 'mcp__houdini__execute_python', arguments: '{"code":"y"}' }] } } },
     { seq: 3, type: 'user/message', data: { content: [{ type: 'text', text: 'weiter' }] } },
   ]
-  assert.equal(prefixHits(nodes, '[tool-call execute_python]').length, 2)
+  // Beide Aufrufe tragen denselben Argumentanfang "{"code":" -> mehrdeutig,
+  // statt still einen zu waehlen.
+  assert.equal(prefixHits(nodes, '[tool-call execute_python] {"code":"').length, 2)
   assert.equal(toolNameSegments('mcp__houdini__execute_python').includes('executepython'), true)
+})
+
+test('anchor: ein Marken-Anker ohne Argument trifft nicht jeden Aufruf des Werkzeugs', () => {
+  // Der Befund aus der echten Sitzung: `[tool-call Bash] {"command":"cd …"}`
+  // traf 654 Bash-Knoten, weil nur der Werkzeugname verglichen wurde.
+  const bash = (seq, cmd) => ({ seq, type: 'assistant/message', data: { message: { content: [
+    { type: 'tool-call', id: 'c' + seq, name: 'bash', arguments: JSON.stringify({ command: cmd }) }] } } })
+  const after = { seq: 99, type: 'user/message', data: { content: [{ type: 'text', text: 'weiter' }] } }
+  const nodes = [bash(1, 'cd /a && ls'), bash(2, 'cd /b && ls'), after]
+  assert.equal(prefixHits(nodes, '[tool-call Bash]').length, 0, 'nur der Name darf keinen Treffer ergeben')
+  assert.deepEqual(prefixHits(nodes, '[tool-call Bash] {"command":"cd /a && ls"}'), [0])
+  assert.deepEqual(prefixHits(nodes, '[tool-call bash] {"command":"cd /b'), [1])
 })
