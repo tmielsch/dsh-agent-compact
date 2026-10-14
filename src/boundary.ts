@@ -264,6 +264,9 @@ export function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: un
   // way). An explicit anchor cannot land there anyway — system nodes are not
   // anchor targets — so this is the one path that had to be closed.
   const head = systemHeadCount(nodes)
+  if (head >= nodes.length) {
+    throw new Error('this surface holds nothing but system messages; there is no exchange to compress yet')
+  }
   let si: number
   if (startAnchor) {
     si = resolveUniqueHit(nodes, startAnchor, 'startAnchor')

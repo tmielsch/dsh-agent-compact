@@ -361,3 +361,8 @@ test('resolveBoundaries: der Belegfall vom 15.10. kann nicht mehr passieren', ()
   assert.equal(nodes[r.si].type, 'user/message')
   assert.notEqual(r.si, 0)
 })
+
+test('resolveBoundaries: eine Oberflaeche aus lauter Systemknoten wird abgelehnt', () => {
+  const nodes = [systemNode(8, 'nur der Prompt'), systemNode(9, 'noch ein Hinweis')]
+  assert.throws(() => resolveBoundaries(nodes, { endAnchor: 'noch ein Hinweis' }), /nothing but system messages/)
+})
