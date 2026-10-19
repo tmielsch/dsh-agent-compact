@@ -18,6 +18,7 @@ import { resolveBoundaries, soleToolCall, spanText } from './boundary.js'
 import { ForkRegistry, SharedTrunkMemo } from './memo.js'
 import { forkCut, forkParent, lockedSpanError, surfaceEvents } from './trunk.js'
 import { DEFAULT_MAX_CHARS, MAX_CHARS, TrunkArchive, referencedIds, renderRecall, spanArchiveId, splitBlocks, trunkRecallId } from './recall.js'
+import { SummaryStash, keptLabel, type KeptSummary } from './summary-stash.js'
 import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode, TrunkDeps } from './optimizer.js'
 import type { TrunkSessionLike } from './trunk.js'
 
@@ -30,10 +31,12 @@ export interface Config {
   volumeNudgeTokens: number
   sharedStoreDir: string
   trunkGuard: boolean
+  keepFailedSummary: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
   autoArchive: Schema.boolean().default(true).description('context_compact saves the full raw span to a spill artifact before replacing it.'),
+  keepFailedSummary: Schema.boolean().default(true).description('A failed compaction keeps the written checkpoint text: the retry may omit `summary` to reuse it unchanged (in memory for this process only; a rewrite after a restart copies it from the previous message).'),
   volumeNudgeTokens: Schema.number().default(50000).description('Every time accumulated tool-result output (heuristic token count) since the last compaction crosses another multiple of this amount, remind the model to consider context_compact. Set to 0 to disable.'),
   sharedStoreDir: Schema.string().default('').description('Directory for the shared-trunk memo (content-addressed trunk checkpoints) and the fork registry. Empty keeps both in memory only, so they do not survive a restart.'),
   trunkGuard: Schema.boolean().default(true).description('Guard automatic compaction in forked sessions (and in parents with known forks): a range reaching into the inherited trunk becomes the shared trunk compaction, or is clamped to start after it.'),
@@ -51,6 +54,9 @@ export function apply(ctx: Context, config: Config) {
   const memo = new SharedTrunkMemo(storeDir, logWarn)
   const registry = new ForkRegistry(storeDir, logWarn)
   const trunkArchive = new TrunkArchive(storeDir)
+  // Failed compactions keep their checkpoint text here (see ./summary-stash.ts):
+  // the retry may omit `summary` and take the kept text unchanged.
+  const stash = new SummaryStash()
   const trunkDeps: TrunkDeps = {
     memo,
     registry,
@@ -373,14 +379,22 @@ export function apply(ctx: Context, config: Config) {
     }))
   }
 
+  // Was der Aufrufer tun soll, wenn ein frisches compaction kein summary mitbringt.
+  function summaryRequiredError(sid: string): string {
+    const kept = stash.list(sid)
+    const head = 'summary is REQUIRED for a fresh compaction: write the Markdown checkpoint yourself (this tool makes no LLM summarizer call)'
+    if (!config.keepFailedSummary || !kept.length) return head
+    return head + '\nto reuse the kept text of a previous failure unchanged, retry the same span without summary' + (keptLabel(kept[0]) ? ' (the newest kept text belongs to ' + keptLabel(kept[0]) + ')' : '')
+  }
+
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span stays readable with context_recall, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: ① Progress — compact each finished step at its topic boundary, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown bullets under ## sections, complete rather than terse; keep exact paths/commands/IDs and the user\'s requirements and direction. Write it for the next similar task, not only for this one: keep measured pitfalls, exact names, numbers, rejected approaches with the reason and the human\'s decisions; a teammate or expert session errs on too detailed rather than too terse. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; checkpoint must be smaller than the compressed span; edges snap to balanced tool-call/result boundaries. Shared trunk: in a forked session (or one with forks of its own) the inherited history is shared with the other forks; a default-scope span may not start inside it. scope "trunk" compacts exactly that inherited trunk — no anchors, no summary — into one checkpoint that is generated once and reused byte for byte by every sibling, keeping the shared prompt cache intact. Choosing anchors (this is where most calls fail — read it before the first attempt): an anchor must be the VERBATIM opening of a message that is still on the surface, and it must fit exactly ONE message. Three rules, in order: (1) Anchor on TEXT YOU WROTE, not on text you remember thinking. Only the visible messages are on the surface; anything that stood solely in your reasoning is not, so it can never match. Quote the first words of a message exactly as they were written, including the opening punctuation. (2) Copy the opening, do not paraphrase it. "The list is done" does not match "Die Leseliste ist durchgearbeitet"; a reworded or translated anchor never matches, and neither does the middle of a message — only its beginning. (3) Make it unique. Openings repeat: several tool calls of the same tool, several messages beginning with "Ok", every checkpoint beginning the same way. If the opening is generic, extend it into the part that is unique to that one message — for a tool call quote the marker AND the first characters of its argument, e.g. `[tool-call Bash] {"command":"cd /repo && ls`; a marker without an argument names one of hundreds of calls and is rejected as ambiguous. If a call fails, the error names the reason and lists the last messages of the surface with copyable openings — copy one of those openings verbatim instead of retrying a variant of the same anchor. Do not retry the same anchor twice. For a long session, compact in several smaller spans rather than one huge one: a small span has obvious, unique anchors and is much easier to get right.',
+    description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span stays readable with context_recall, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: ① Progress — compact each finished step at its topic boundary, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown bullets under ## sections, complete rather than terse; keep exact paths/commands/IDs and the user\'s requirements and direction. Write it for the next similar task, not only for this one: keep measured pitfalls, exact names, numbers, rejected approaches with the reason and the human\'s decisions; a teammate or expert session errs on too detailed rather than too terse. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; checkpoint must be smaller than the compressed span; edges snap to balanced tool-call/result boundaries. A failed compaction keeps the checkpoint text you wrote: retry the same span WITHOUT summary to reuse it unchanged (write a new summary only to rewrite the text) — never rewrite a kept checkpoint from memory when the retry can take it back. Shared trunk: in a forked session (or one with forks of its own) the inherited history is shared with the other forks; a default-scope span may not start inside it. scope "trunk" compacts exactly that inherited trunk — no anchors, no summary — into one checkpoint that is generated once and reused byte for byte by every sibling, keeping the shared prompt cache intact. Choosing anchors (this is where most calls fail — read it before the first attempt): an anchor must be the VERBATIM opening of a message that is still on the surface, and it must fit exactly ONE message. Three rules, in order: (1) Anchor on TEXT YOU WROTE, not on text you remember thinking. Only the visible messages are on the surface; anything that stood solely in your reasoning is not, so it can never match. Quote the first words of a message exactly as they were written, including the opening punctuation. (2) Copy the opening, do not paraphrase it. "The list is done" does not match "Die Leseliste ist durchgearbeitet"; a reworded or translated anchor never matches, and neither does the middle of a message — only its beginning. (3) Make it unique. Openings repeat: several tool calls of the same tool, several messages beginning with "Ok", every checkpoint beginning the same way. If the opening is generic, extend it into the part that is unique to that one message — for a tool call quote the marker AND the first characters of its argument, e.g. `[tool-call Bash] {"command":"cd /repo && ls`; a marker without an argument names one of hundreds of calls and is rejected as ambiguous. If a call fails, the error names the reason and lists the last messages of the surface with copyable openings — copy one of those openings verbatim instead of retrying a variant of the same anchor. Do not retry the same anchor twice. For a long session, compact in several smaller spans rather than one huge one: a small span has obvious, unique anchors and is much easier to get right.',
     parameters: {
       scope: { type: 'string', enum: ['span', 'trunk'], description: 'Optional. "span" (default) compacts the span between the anchors with your summary. "trunk" compacts the whole history this forked session shares with its siblings or forks into the shared checkpoint; startAnchor, endAnchor and summary are ignored.' },
       startAnchor: { type: 'string', description: 'Verbatim opening of the span\'s first message (see "Choosing anchors" in the description). Omit it only to rebaseline from the beginning; the span then starts after the system prompt. The system prompt itself can never be compressed.' },
       endAnchor: { type: 'string', description: 'Verbatim opening of the span\'s last message; required for scope "span". This node is replaced — pass its predecessor\'s opening to keep it. See "Choosing anchors" in the description.' },
-      summary: { type: 'string', description: 'Required for scope "span". The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; must be smaller than the compressed content, but keep every detail a later similar task could need.' },
+      summary: { type: 'string', description: 'Required for scope "span" on a fresh compaction. The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; must be smaller than the compressed content, but keep every detail a later similar task could need. After a failed compaction you may OMIT it to reuse the kept text of that failure unchanged (retried only for the same span); pass a new one to rewrite it.' },
     },
     output: {
       // 显式声明真实字段（而非开放的 additionalProperties:true 空对象），
@@ -416,6 +430,8 @@ export function apply(ctx: Context, config: Config) {
             description: 'Present only for scope "trunk".',
           },
           recall: { type: 'string', description: 'Archive id of the compacted original, for context_recall.' },
+          reused: { type: 'boolean', description: 'Present and true when summary was omitted and the kept text of the previous failure was reused.' },
+          kept: { type: 'boolean', description: 'Present and true when this call failed and its checkpoint text was kept for the retry (omit summary on the retry to reuse it).' },
         },
       },
       render(args, value) { return [{ type: 'text', text: JSON.stringify(value) }] },
@@ -423,12 +439,13 @@ export function apply(ctx: Context, config: Config) {
     async execute(args, exec) {
       const agent = agentOf(exec)
       if (!agent) throw new Error('no agent session available for this call')
+      const sid = agent.session.id
       const rawScope = args.scope as unknown
       const scope = rawScope === undefined || rawScope === null || rawScope === '' ? 'span' : rawScope
       if (scope !== 'span' && scope !== 'trunk') throw new Error('scope must be "span" or "trunk"')
-      if (scope === 'span' && (typeof args.summary !== 'string' || !args.summary.trim())) {
-        throw new Error('summary is REQUIRED: write the Markdown checkpoint yourself (this tool makes no LLM summarizer call)')
-      }
+      const summaryArg = typeof args.summary === 'string' && args.summary.trim() ? args.summary : null
+      const rawStartAnchor = typeof args.startAnchor === 'string' && args.startAnchor.trim() ? args.startAnchor : undefined
+      const rawEndAnchor = typeof args.endAnchor === 'string' && args.endAnchor.trim() ? args.endAnchor : undefined
       const engine = resolveService(agent, 'compaction') as CompactionLike | undefined
       if (!engine) throw new Error('compaction service is not available in this runtime (tried host plane and preset realm)')
       patchEngine(engine as unknown as OptimizedEngineLike, trunkDeps)
@@ -437,12 +454,16 @@ export function apply(ctx: Context, config: Config) {
       const session = agent.session as SessionLike & TrunkSessionLike
       const cut = await effectiveCut(session, registry)
 
-      let si: number
-      let ei: number
-      let startSeq: number
-      let endSeq: number
+      let si = -1
+      let ei = -1
+      let startSeq = -1
+      let endSeq = -1
       let trunkPlan: ReturnType<typeof planTrunk> = null
       let trunkReused = false
+      // For scope "span" without summary: the kept entry the retry reuses.
+      let keptEntry: KeptSummary | null = null
+      // The checkpoint text handed to the engine (scope "span" only).
+      let summaryText: string | null = null
       if (scope === 'trunk') {
         if (!(cut > 0)) {
           throw new Error('scope "trunk" applies only to a forked session (a teammate or subagent created as a fork) or to a session with known forks of its own; this session has no inherited trunk. Use the default scope with startAnchor, endAnchor and summary.')
@@ -456,11 +477,60 @@ export function apply(ctx: Context, config: Config) {
         si = nodes.findIndex((n) => n.seq === startSeq)
         ei = nodes.findIndex((n) => n.seq === endSeq)
       } else {
-        const b = resolveBoundaries(nodes, args)
-        si = b.si
-        ei = b.ei
-        startSeq = b.startSeq
-        endSeq = b.endSeq
+        // Checkpoint-Wiederverwendung (./summary-stash.ts): der Text eines
+        // Fehlschlags bleibt in der Ablage, ein erneuter Aufruf ohne summary
+        // nimmt ihn unverändert wieder auf — der Wiederversuch kostet dann nur
+        // den Werkzeugaufruf, nicht die erneute Niederschrift des Checkpoints.
+        summaryText = summaryArg
+        if (summaryArg && config.keepFailedSummary) {
+          // Sofort merken: auch wenn die Anker-Auflösung gleich scheitert
+          // (AMBIGUOUS / not found), bleibt der Text erhalten.
+          stash.save(sid, { text: summaryArg, startAnchor: rawStartAnchor, endAnchor: rawEndAnchor })
+        } else if (!summaryArg && rawStartAnchor === undefined && rawEndAnchor === undefined) {
+          // Ohne Anker und ohne summary: der blanke Wiederversuch des letzten
+          // Fehlschlags — derselbe Bereich, derselbe Text.
+          const last = stash.list(sid)[0] ?? null
+          if (!last || last.startSeq === undefined || last.endSeq === undefined) throw new Error(summaryRequiredError(sid))
+          keptEntry = last
+          summaryText = last.text
+          si = nodes.findIndex((n) => n.seq === last.startSeq)
+          ei = nodes.findIndex((n) => n.seq === last.endSeq)
+          if (si < 0 || ei < si) {
+            throw new Error('the kept checkpoint text targets range [' + last.startSeq + ',' + last.endSeq + '], which is no longer on the surface; pass startAnchor, endAnchor and summary again')
+          }
+          startSeq = last.startSeq
+          endSeq = last.endSeq
+          // Herausnehmen wie beim Anker-Wiederversuch: bei Erfolg ist der
+          // Eintrag verbraucht, bei Fehlschlag wird er unten wieder abgelegt.
+          stash.takeMatched(sid, { startSeq: last.startSeq, endSeq: last.endSeq })
+        }
+        if (!keptEntry) {
+          let b: ReturnType<typeof resolveBoundaries>
+          try {
+            b = resolveBoundaries(nodes, args)
+          } catch (e) {
+            const msg = e && (e as Error).message ? (e as Error).message : String(e)
+            throw new Error(summaryArg && config.keepFailedSummary
+              ? msg + '\nthe checkpoint text you wrote is kept; retry with a corrected endAnchor and omit summary to reuse it'
+              : msg)
+          }
+          si = b.si
+          ei = b.ei
+          startSeq = b.startSeq
+          endSeq = b.endSeq
+          if (summaryArg) {
+            if (config.keepFailedSummary) {
+              // Mit den aufgelösten Grenzen aktualisieren (gleicher Text und
+              // dieselben Anker ersetzen den Eintrag an derselben Stelle).
+              stash.save(sid, { text: summaryText as string, startAnchor: rawStartAnchor, endAnchor: rawEndAnchor, startSeq, endSeq })
+            }
+          } else {
+            const hit = stash.takeMatched(sid, { startAnchor: rawStartAnchor, endAnchor: rawEndAnchor, startSeq, endSeq })
+            if (!hit) throw new Error(summaryRequiredError(sid))
+            keptEntry = hit
+            summaryText = hit.text
+          }
+        }
         // Shared trunk lock: a default-scope span must start after the protected prefix.
         if (cut > 0) {
           const locked = lockedSpanError(surfaceEvents(session), cut, startSeq)
@@ -469,7 +539,7 @@ export function apply(ctx: Context, config: Config) {
         // 把 agent 编写的检查点交给引擎；被修补的 summarizer 消费它（一次性）
         // 并完全跳过 LLM 调用。
         const ext = ((engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary ??= {})
-        ext[agent.session.id] = args.summary as string
+        ext[sid] = summaryText as string
       }
 
       // Span scope keeps its raw span in the session's spill archive here; the
@@ -490,7 +560,7 @@ export function apply(ctx: Context, config: Config) {
         archiveError = spillStore ? 'span not found on the read surface; raw copy not saved (compaction still proceeds)' : 'spillStore unavailable; raw copy not saved (compaction still proceeds)'
       }
       // One shot: the patched summarize() appends the recall reference to this checkpoint.
-      if (recallId) (optimized._acArchiveIds ??= {})[agent.session.id] = recallId
+      if (recallId) (optimized._acArchiveIds ??= {})[sid] = recallId
 
       let result: CompactionResultLike
       try {
@@ -501,10 +571,19 @@ export function apply(ctx: Context, config: Config) {
         const msg = err && (err as Error).message ? (err as Error).message : String(err)
         // Never leave a one-shot summary behind for a later, unrelated compaction.
         const ext = (engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary
-        if (ext) delete ext[agent.session.id]
-        throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg)
+        if (ext) delete ext[sid]
+        // Den geschriebenen Checkpoint-Text behalten: der nächste Versuch darf
+        // ihn ohne summary unverändert wiederverwenden (./summary-stash.ts).
+        let kept = false
+        if (!trunkPlan && config.keepFailedSummary && summaryText) {
+          stash.save(sid, { text: summaryText, startAnchor: rawStartAnchor, endAnchor: rawEndAnchor, startSeq, endSeq })
+          kept = true
+        }
+        throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg + (kept
+          ? '\nthe checkpoint text you wrote is kept; retry the same range without summary to reuse it unchanged (the raw span is still in the conversation; pass summary only to rewrite it)'
+          : ''))
       } finally {
-        if (optimized._acArchiveIds) delete optimized._acArchiveIds[agent.session.id]
+        if (optimized._acArchiveIds) delete optimized._acArchiveIds[sid]
       }
       if (trunkPlan) {
         // Decide "reused" from the stored entry's origin: with concurrent siblings
@@ -523,7 +602,6 @@ export function apply(ctx: Context, config: Config) {
         const holder = nodes.filter((n) => soleToolCall(n, callId)).pop()
         const assistantSeq = holder ? holder.seq : undefined
         if (assistantSeq !== undefined && assistantSeq > endSeq) {
-          const sid = agent.session.id
           let done = false
           const off = ctx.on('session/event', (s: { id?: string } | undefined, ev: SessionEventLike) => {
             if (done) return
@@ -589,6 +667,7 @@ export function apply(ctx: Context, config: Config) {
         archiveError?: string
         sharedTrunk?: { key: string; reused: boolean }
         recall?: string
+        reused?: boolean
       } = {
         ok: true,
         archived: archived ? {
@@ -599,6 +678,7 @@ export function apply(ctx: Context, config: Config) {
       if (archiveError) out.archiveError = typeof archiveError === 'string' ? archiveError : String(archiveError)
       if (trunkPlan) out.sharedTrunk = { key: trunkPlan.key, reused: trunkReused }
       if (recallId) out.recall = recallId
+      if (keptEntry) out.reused = true
       return out
     },
   })))
