@@ -48,7 +48,7 @@ This fork is installed from its own release tarball — one line, no registry
 account, no checkout:
 
 ```sh
-dsh plugin --profile web add https://github.com/tmielsch/dsh-agent-compact/releases/download/v0.2.1-trunk.10/rolling-compaction-0.2.1-trunk.10.tgz
+dsh plugin --profile web add https://github.com/tmielsch/dsh-agent-compact/releases/download/v0.2.1-trunk.12/tmielsch-rolling-compaction-0.2.1-trunk.12.tgz
 ```
 
 Replace the version in both places with the one you want
@@ -94,18 +94,20 @@ If the plugin was additionally mounted through a row in the profile's `cordis.pa
 | field | default | meaning |
 |---|---|---|
 | `autoArchive` | `true` | `context_compact` saves the full raw span to a spill artifact before replacing it |
+| `keepFailedSummary` | `true` | A failed compaction keeps the checkpoint text the model wrote: the retry may omit `summary` and reuse it unchanged (kept in memory for the running process; after a restart the text is still word-for-word in the previous message and is copied from there) |
 | `volumeNudgeTokens` | `50000` | Every time accumulated surface growth (heuristic token count) since the last compaction crosses another multiple of this amount, remind the model to consider `context_compact`. `0` disables the nudge. |
 
 Pass through the inserted row in the profile's `cordis.patch.yml` or a bundle patch.
 
 ## How it works
 
-- **Agent-written checkpoint**: `summary` is mandatory, so the tool path always uses the checkpoint the agent wrote. `patchEngine()` (see `src/optimizer.ts`) wraps the engine's `summarize()`: when an `_externalSummary` is present (one-shot, keyed per session id), it returns that text directly; only when none is present does it forward to the stock implementation — a branch that serves the automatic compaction path and keeps official behavior intact.
+- **Agent-written checkpoint**: `summary` is required for a fresh compaction (and for a retry that rewrites the text), so the tool path always uses the checkpoint the agent wrote. `patchEngine()` (see `src/optimizer.ts`) wraps the engine's `summarize()`: when an `_externalSummary` is present (one-shot, keyed per session id), it returns that text directly; only when none is present does it forward to the stock implementation — a branch that serves the automatic compaction path and keeps official behavior intact.
 - **System-prompt guidance**: the bundle registers a global prompt section (`tool:context_compact`, order 118) that tells the agent to use `context_compact` proactively — compress finished steps at topic boundaries instead of waiting for automatic full-context compaction.
 - **Proactive volume nudge**: a `systemPrompt.context()` injection (`agent-compact:volume-nudge`, order 50) reminds the model once each time the session's surface has grown by another `volumeNudgeTokens` (default `50000`) multiple since the last compaction. It measures occupancy via `contextPressure.projectedTokens` (falling back to `tokenMeter.measure().surfaceTokens`); the growth baseline resets on every `compaction/summary`; `0` disables it. As a tail `systemPrompt.context()`, unchanged text is a no-op (KV-cache friendly) and it is independent of the auto-compactor's pressure threshold.
 - **Anchor matching** (`src/normalize.ts`): `normText` collapses whitespace and maps CJK full-width punctuation to half-width (，→, etc.), applied to both anchors and node text. Matching keeps **unique-prefix** semantics: zero hits → "not found" with closest-node hints; more than one hit → "AMBIGUOUS".
 - **Restart-safe sequential archives**: the next number is derived by scanning the session's spill directory (`max+1`) — gap-free; the backend's random hex prefix makes filename collisions impossible.
 - **Paired cleanup**: the tool-call message (carrying the full `summary` argument) and its tool/result are each replaced by one tiny shadow message, so the checkpoint text never appears twice on the surface (skipped when the message holds more than one tool call).
+- **A failed compaction keeps its text** (`src/summary-stash.ts`): when the engine rejects a span (open step, unstable surface, summary not smaller, transient error), the checkpoint text the model already wrote is no longer thrown away. The retry calls `context_compact` with the same anchors and **without** `summary`, and the kept text is used unchanged — a retry costs the tool call again, not a second writing of the checkpoint (two minutes of model time, reported 2026-10-20). A text survives a failed anchor resolution (AMBIGUOUS / not found) too, so nothing is ever rewritten from memory. A kept entry matches the retry by its resolved range (same compaction retried), its `endAnchor` (surface moved), or — for attempts that never resolved anything — a lengthened `endAnchor` (the "AMBIGUOUS" fix). Passing `summary` on a retry means "write this instead"; a successful compaction clears the session's kept texts; `keepFailedSummary: false` turns the whole feature off.
 
 ## Shared trunk (fork extension)
 
