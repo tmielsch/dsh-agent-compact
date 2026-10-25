@@ -20,11 +20,44 @@
 import { normText } from './normalize.js'
 import { blockText, nodeContent } from './surface-text.js'
 import type { SurfaceNode } from './optimizer.js'
+import { createHash } from 'node:crypto'
 
 /** Tools whose calls and results echo anchors: never anchor targets through their arguments or results. */
 const SELF_TOOLS = new Set(['context_compact', 'context_recall'])
 /** A string argument shorter than this is too generic to identify a call. */
 const MIN_ARG_CHARS = 12
+
+/**
+ * The marker line the volume nudge prints for anchorable messages:
+ *     [a7f3] Die Leseliste ist durchgearbeitet …
+ *
+ * `seq` names the node on the surface; the five marker characters are the
+ * checksum of that seq, so a model cannot quote a marker for a node that does
+ * not exist, and two markers never collide by accident. A quoted marker is the
+ * one anchor reading that can never be AMBIGUOUS or not-found — which is why
+ * it is tried before every text tier.
+ */
+export interface AnchorMarker {
+  /** the marker id, `[a7f3]` */
+  tag: string
+  /** the seq it names */
+  seq: number
+  /** the opening the model also sees, for the hint line */
+  opening: string
+}
+
+/** The checksum of a seq: five marker characters. */
+export function markerTag(seq: number): string {
+  const h = createHash('sha256').update('rolling-compaction/marker/v1:' + seq).digest('hex')
+  return '[a' + h.slice(0, 6) + ']'
+}
+
+/** Parse a leading `[a###]` marker from an anchor; null when the anchor does not start with one. */
+export function parseAnchorMarker(anchor: string): { tag: string; rest: string } | null {
+  const m = /^\s*\[(a[0-9a-f]{6})\]\s*/i.exec(anchor)
+  if (!m) return null
+  return { tag: m[1].toLowerCase(), rest: anchor.slice(m[0].length) }
+}
 
 /** Normalized text without the `[tool-call …]` / `[tool-result]` markers the hints print. */
 export function strippedText(s: string): string {

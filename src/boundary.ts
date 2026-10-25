@@ -8,7 +8,7 @@
 
 import { normText } from './normalize.js'
 import { nodeFlatText } from './surface-text.js'
-import { anchorForm, anchorItems, callNames, isSelfResult, messageTiers, modelViewText, resultTiers, type AnchorItem } from './anchor.js'
+import { anchorForm, anchorItems, callNames, isSelfResult, markerTag, messageTiers, modelViewText, parseAnchorMarker, resultTiers, type AnchorItem } from './anchor.js'
 import type { SurfaceNode } from './optimizer.js'
 
 interface SurfaceNodeErrorData {
@@ -74,9 +74,23 @@ function isEligibleAnchorNode(nodes: SurfaceNode[], i: number): boolean {
 // tier is the rule above, so anchors that matched before resolve unchanged. Tool
 // results are tried last, and never those of context_compact / context_recall,
 // whose results echo the anchor.
+//
+// Marker-first: an anchor that opens with `[a###]` (a marker the volume nudge
+// printed) resolves by that marker alone, before any text reading. The marker
+// names exactly one node, so it is never AMBIGUOUS and never silently wrong;
+// whatever text follows the marker is accepted as a comment and not matched
+// against the node text (a model may add a paraphrase after the marker).
 export function prefixHits(nodes: SurfaceNode[], anchor: string): number[] {
   const f = anchorForm(anchor)
   if (!f.n) return []
+  const marker = parseAnchorMarker(anchor)
+  if (marker) {
+    const hit = nodes.findIndex((n) => n.seq !== undefined && markerTag(n.seq) === '[' + marker.tag + ']')
+    if (hit >= 0) return [hit]
+    // A marker that names no current node falls through to the text readings:
+    // the span it named may already be compacted away, and the text the model
+    // appended after it may still resolve.
+  }
   const cache = new Map<number, AnchorItem[]>()
   const items = (i: number): AnchorItem[] => {
     let it = cache.get(i)

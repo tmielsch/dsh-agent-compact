@@ -15,6 +15,8 @@ import { effectiveCut, patchEngine, planTrunk, runTrunkCompaction } from './opti
 import { normText } from './normalize.js'
 import { CtxSurfaceService } from './ctx-surface.js'
 import { resolveBoundaries, soleToolCall, spanText } from './boundary.js'
+import { markerTag } from './anchor.js'
+import { nodeFlatText } from './surface-text.js'
 import { ForkRegistry, SharedTrunkMemo } from './memo.js'
 import { forkCut, forkParent, lockedSpanError, surfaceEvents } from './trunk.js'
 import { DEFAULT_MAX_CHARS, MAX_CHARS, TrunkArchive, referencedIds, renderRecall, spanArchiveId, splitBlocks, trunkRecallId } from './recall.js'
@@ -348,8 +350,40 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 通过 systemPrompt.context() 注入尾部实时提示：仅在增长跨过整数倍的那几步
-  // 写入 KV 缓存（文本不变时是完全的 no-op），独立于自动引擎的压力阈值。
+  // Fork: Anker-Marker im Nudge. Der Hinweis listet die letzten verankerbaren
+  // Nachrichten mit einer festen Kennung `[a###]` auf. Ein Modell, das diese
+  // Kennung als startAnchor/endAnchor uebernimmt, trifft genau den gemeinten
+  // Knoten — nie mehrdeutig, nie nicht gefunden. Das ist die Antwort auf das
+  // gemessene Hauptproblem (60 von 73 Fehlversuchen waren Anker-Fehler, fast
+  // alle AMBIGUOUS). Die Kennung ist die Pruefsumme der seq: das Modell kann
+  // sie nicht raten, also kann ein zitierter Marker nie einen Knoten meinen,
+  // den es nicht gibt.
   if (systemPrompt) {
+    // Synchron und ohne sessionQuery: die Oberflaeche kommt aus der Sitzung
+    // selbst (session.surface.nodes + eventAt), so wie es der Trunk-Schutz
+    // auch macht. Der Kontext-Provider muss synchron sein.
+    const markerLines = (session: SessionLike): string => {
+      try {
+        const evs = surfaceEvents(session as never)
+        if (!evs.length) return ''
+        const eligible: { seq: number; type: string }[] = []
+        for (let i = evs.length - 1; i >= 0 && eligible.length < 8; i--) {
+          const e = evs[i] as { seq?: unknown; type?: unknown }
+          if (e.type !== 'user/message' && e.type !== 'assistant/message') continue
+          eligible.unshift({ seq: e.seq as number, type: e.type as string })
+        }
+        if (!eligible.length) return ''
+        return eligible.map((e) => {
+          const ev = evs.find((x) => (x as { seq?: unknown }).seq === e.seq) as { data?: unknown } | undefined
+          const n: SurfaceNode = { seq: e.seq, type: e.type, data: ev?.data }
+          const opening = nodeFlatText(n, { skipReasoning: true, dropImages: false }).replace(/\s+/g, ' ').slice(0, 60)
+          return markerTag(e.seq) + (opening ? ' ' + opening : '')
+        }).join('\n')
+      } catch (err) {
+        return ''
+      }
+    }
+
     disposers.push(systemPrompt.context({
       name: 'agent-compact:volume-nudge',
       order: 50,
@@ -371,7 +405,9 @@ export function apply(ctx: Context, config: Config) {
           const bucket = Math.floor(grown / threshold)
           if (bucket <= 0) return ''
           const approxK = Math.round((bucket * threshold) / 1000)
-          return '`context_compact` reminder: this session\'s surface has grown by roughly ' + approxK + 'k+ tokens since the last compaction (tool results AND your own reasoning/output both count). Compress by sub-task module, not all at once: when one sub-task\'s span (its tool results + your reasoning/output) has consumed a large share of the surface and that sub-task has reached a conclusion, consider compacting that module\'s span now with `context_compact`, but only if a checkpoint can fully carry it. Weigh first whether this topic could come back in a similar form; if you work as a teammate and expert for an area, it probably will, so keep in the checkpoint the details a later similar task would need.'
+          const markers = markerLines(agent.session)
+          return '`context_compact` reminder: this session\'s surface has grown by roughly ' + approxK + 'k+ tokens since the last compaction (tool results AND your own reasoning/output both count). Compress by sub-task module, not all at once: when one sub-task\'s span (its tool results + your own reasoning/output) has consumed a large share of the surface and that sub-task has reached a conclusion, consider compacting that module\'s span now with `context_compact`, but only if a checkpoint can fully carry it. Weigh first whether this topic could come back in a similar form; if you work as a teammate and expert for an area, it probably will, so keep the checkpoint the details a later similar task would need.' +
+            (markers ? '\n\nAnchor markers for the most recent messages — using one as startAnchor or endAnchor names exactly one message and never fails (preferred over quoting text):\n' + markers : '')
         } catch (e) {
           return ''
         }
@@ -392,8 +428,8 @@ export function apply(ctx: Context, config: Config) {
     description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span stays readable with context_recall, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: ① Progress — compact each finished step at its topic boundary, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown bullets under ## sections, complete rather than terse; keep exact paths/commands/IDs and the user\'s requirements and direction. Write it for the next similar task, not only for this one: keep measured pitfalls, exact names, numbers, rejected approaches with the reason and the human\'s decisions; a teammate or expert session errs on too detailed rather than too terse. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; checkpoint must be smaller than the compressed span; edges snap to balanced tool-call/result boundaries. A failed compaction keeps the checkpoint text you wrote: retry the same span WITHOUT summary to reuse it unchanged (write a new summary only to rewrite the text) — never rewrite a kept checkpoint from memory when the retry can take it back. Shared trunk: in a forked session (or one with forks of its own) the inherited history is shared with the other forks; a default-scope span may not start inside it. scope "trunk" compacts exactly that inherited trunk — no anchors, no summary — into one checkpoint that is generated once and reused byte for byte by every sibling, keeping the shared prompt cache intact. Choosing anchors (this is where most calls fail — read it before the first attempt): an anchor must be the VERBATIM opening of a message that is still on the surface, and it must fit exactly ONE message. Three rules, in order: (1) Anchor on TEXT YOU WROTE, not on text you remember thinking. Only the visible messages are on the surface; anything that stood solely in your reasoning is not, so it can never match. Quote the first words of a message exactly as they were written, including the opening punctuation. (2) Copy the opening, do not paraphrase it. "The list is done" does not match "Die Leseliste ist durchgearbeitet"; a reworded or translated anchor never matches, and neither does the middle of a message — only its beginning. (3) Make it unique. Openings repeat: several tool calls of the same tool, several messages beginning with "Ok", every checkpoint beginning the same way. If the opening is generic, extend it into the part that is unique to that one message — for a tool call quote the marker AND the first characters of its argument, e.g. `[tool-call Bash] {"command":"cd /repo && ls`; a marker without an argument names one of hundreds of calls and is rejected as ambiguous. If a call fails, the error names the reason and lists the last messages of the surface with copyable openings — copy one of those openings verbatim instead of retrying a variant of the same anchor. Do not retry the same anchor twice. For a long session, compact in several smaller spans rather than one huge one: a small span has obvious, unique anchors and is much easier to get right.',
     parameters: {
       scope: { type: 'string', enum: ['span', 'trunk'], description: 'Optional. "span" (default) compacts the span between the anchors with your summary. "trunk" compacts the whole history this forked session shares with its siblings or forks into the shared checkpoint; startAnchor, endAnchor and summary are ignored.' },
-      startAnchor: { type: 'string', description: 'Verbatim opening of the span\'s first message (see "Choosing anchors" in the description). Omit it only to rebaseline from the beginning; the span then starts after the system prompt. The system prompt itself can never be compressed.' },
-      endAnchor: { type: 'string', description: 'Verbatim opening of the span\'s last message; required for scope "span". This node is replaced — pass its predecessor\'s opening to keep it. See "Choosing anchors" in the description.' },
+      startAnchor: { type: 'string', description: 'Verbatim opening of the span\'s first message — or, PREFERRED, a marker id like `[a7730ed]` from the reminder\'s anchor-marker list: it names exactly one message and never fails. Otherwise see "Choosing anchors" in the description. Omit it only to rebaseline from the beginning; the span then starts after the system prompt.' },
+      endAnchor: { type: 'string', description: 'Verbatim opening of the span\'s last message, or PREFERRED a marker id like `[a7730ed]` from the reminder\'s anchor-marker list. Required for scope "span". This node is replaced — pass its predecessor\'s marker to keep it.' },
       summary: { type: 'string', description: 'Required for scope "span" on a fresh compaction. The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; must be smaller than the compressed content, but keep every detail a later similar task could need. After a failed compaction you may OMIT it to reuse the kept text of that failure unchanged (retried only for the same span); pass a new one to rewrite it.' },
     },
     output: {
