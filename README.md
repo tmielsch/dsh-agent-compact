@@ -155,6 +155,21 @@ A second regression came from the fix above it. Matching a `[tool-call Name] …
 
 A namespaced tool call had one more trap. The hints print the call as `[tool-call mcp__houdini__execute_python] …`, and the model, quoting that same call back, wrote `[tool-call execute_python]` — the namespace was gone. One real session therefore reported *not found* for an anchor that named a call present on the surface twice over. A leading `[tool-call …]` marker is now compared against the whole tool name and against each `__`-separated segment, so the shortened form resolves to the same call. Two calls that differ only in namespace still report AMBIGUOUS instead of silently picking one. Replayed against the real session that hit this, the anchor now resolves to the same span the model intended (seq 82…260).
 
+## Anchor markers (fork extension)
+
+The measured main failure of compaction was never the engine — it was the anchor. 60 of 73 failed calls in 102 sessions were anchor errors, almost all AMBIGUOUS: `[tool-call Bash] {"command":"cd …"}` matched all 654 Bash calls of one real session, and three messages beginning "Ok" are three matches.
+
+The volume nudge therefore lists the most recent anchorable messages with a **fixed marker id**, the SHA-256 checksum of the node's seq:
+
+```
+[a7730ed] lead: Neue Scheibe R1, diesmal mit dem Randkorrektur-Weg
+[ab12f04] Ok, ich habe die Laibungen an W29 nachgerechnet und der Befund
+```
+
+An anchor that opens with such a marker resolves **by the marker alone**, before any text reading: exactly one node, never ambiguous, never not found. Whatever text follows the marker in the anchor is accepted as a comment and not matched (a model may add a paraphrase). A marker that names no current node — the span it named may be compacted away — falls through to the text readings, so quoting a stale marker plus the right opening still resolves. A marker cannot be guessed: the checksum of a seq that does not exist names nothing, so a hallucinated marker is a not-found, not a wrong node.
+
+The ids are six hex characters (16 M values). Within any 64-seq window — eight times the nudge's listing window — no two ids collide (birthday bound ≈ 0.01 %), and a collision between distant seqs is harmless: only a node actually on the surface can be hit, and the nudge lists only the last few messages.
+
 ## Reasoning stays out (fork extension)
 
 Every checkpoint and every archive this plugin writes leaves the model's reasoning trace out. Two reasons: a reasoning trace is useless on re-entry — it explains how someone arrived at a thought, not what was decided — and it is the text class Anthropic's request filter reacts to. On 2026-10-09 two long sessions on `claude-opus-5-5` were answered with

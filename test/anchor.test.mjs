@@ -5,7 +5,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { resolveBoundaries, prefixHits } from '../lib/boundary.js'
-import { stripHandles, toolNameSegments } from '../lib/anchor.js'
+import { stripHandles, toolNameSegments, markerTag, parseAnchorMarker } from '../lib/anchor.js'
 
 const IMG_A = 'sha256:1c9be60e6d716067cf2869145f6cb4aaa1b1d5507246737286b99455f0575020'
 const IMG_B = 'sha256:456754a2e290c9fce18f869b306b5f855858b0547155a16d8aa8379838e14b99'
@@ -164,4 +164,49 @@ test('anchor: ein Marken-Anker ohne Argument trifft nicht jeden Aufruf des Werkz
   assert.equal(prefixHits(nodes, '[tool-call Bash]').length, 0, 'nur der Name darf keinen Treffer ergeben')
   assert.deepEqual(prefixHits(nodes, '[tool-call Bash] {"command":"cd /a && ls"}'), [0])
   assert.deepEqual(prefixHits(nodes, '[tool-call bash] {"command":"cd /b'), [1])
+})
+
+// ---- Anker-Marker `[a###]` (2026-10-25) ----
+// Der Nudge listet verankerbare Nachrichten mit einer festen Kennung auf. Ein
+// Anker, der mit dieser Kennung beginnt, trifft genau den gemeinten Knoten —
+// nie mehrdeutig, nie nicht gefunden.
+
+test('anchor: ein Marker trifft genau seinen Knoten, nicht mehrdeutig', () => {
+  const mk = (seq, text) => ({ seq, type: 'user/message', data: { content: [{ type: 'text', text }] } })
+  const nodes = [mk(10, 'erste'), mk(11, 'erste'), mk(12, 'erste')]   // drei identige Anfaenge
+  const tag = markerTag(11)
+  assert.deepEqual(prefixHits(nodes, tag), [1], 'der Marker muss den Knoten 11 allein treffen')
+  // Auch mit zitiertem Text dahinter (das Modell ergaenzt gern):
+  assert.deepEqual(prefixHits(nodes, tag + ' erste Nachricht, die dritte Runde'), [1])
+})
+
+test('anchor: ein Marker fuer einen weggefallenen Knoten findet nichts (kein Stellvertreter)', () => {
+  const mk = (seq, text) => ({ seq, type: 'user/message', data: { content: [{ type: 'text', text }] } })
+  const nodes = [mk(10, 'erste'), mk(11, 'erste')]
+  const toterMarker = '[a999999]'
+  assert.equal(prefixHits(nodes, toterMarker).length, 0)
+})
+
+test('anchor: die Kennung ist die Pruefsumme der seq und kollidiert nicht', () => {
+  // 6 Hex-Zeichen = 16 Mio Werte. Kollisionen zwischen weit entfernten seqs
+  // sind unschaedlich: ein Anker trifft nur den Knoten, dessen Kennung er nennt,
+  // und der Nudge listet nur die letzten 8 Nachrichten. Getestet wird deshalb
+  // die realistische Spanne: innerhalb eines Fensters von 64 seqs (dem 8-fachen des
+  // Nudge-Fensters) darf keine Kennung doppelt vorkommen.
+  const window = 64
+  for (let start = 0; start < 20000; start += window) {
+    const tags = new Set()
+    for (let seq = start; seq < Math.min(start + window, 20000); seq++) tags.add(markerTag(seq))
+    if (tags.size !== Math.min(window, 20000 - start)) {
+      assert.fail('Kollision im Fenster ab seq ' + start)
+    }
+  }
+  assert.match(markerTag(42), /^\[a[0-9a-f]{6}\]$/)
+})
+
+test('anchor: parseAnchorMarker erkennt die Kennung und trennt den Rest', () => {
+  assert.deepEqual(parseAnchorMarker('[a7f315f] danach Text'), { tag: 'a7f315f', rest: 'danach Text' })
+  assert.deepEqual(parseAnchorMarker('  [A7F315F]gross geschrieben'), { tag: 'a7f315f', rest: 'gross geschrieben' })
+  assert.equal(parseAnchorMarker('kein Marker am Anfang'), null)
+  assert.equal(parseAnchorMarker('[b7f315f] falscher Buchstabe'), null)
 })
