@@ -84,9 +84,14 @@ function sameCompactions(a: readonly CompactionLite[], b: readonly CompactionLit
   return a.length === b.length && a.every((c, i) => c.compactionId === b[i].compactionId && c.checkpointSeq === b[i].checkpointSeq && c.summaryText === b[i].summaryText)
 }
 
+// DSH scrolls the whole conversation area as ONE page ([data-conversation-scroll] makes the
+// chat's own scroller `overflow: visible`), so a bar at the top of the tab scrolls away when
+// the chat is at the bottom (measured: bar present in the DOM, not on screen). `sticky` keeps
+// it at the top of that page; the opaque background keeps chat rows from showing through.
 const barStyle: React.CSSProperties = {
   display: 'flex', alignItems: 'center', gap: 8, padding: '6px 16px', fontSize: 12,
   color: 'var(--dsw-alias-label-secondary)', borderBottom: '1px solid var(--dsw-alias-border-l1)',
+  position: 'sticky', top: 0, zIndex: 9, background: 'var(--dsw-alias-bg-layer-1, #1b1b1d)',
 }
 const buttonStyle: React.CSSProperties = {
   font: 'inherit', cursor: 'pointer', color: 'var(--dsw-alias-label-primary)',
