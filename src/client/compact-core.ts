@@ -234,3 +234,34 @@ export function tokensText(tokens: number): string {
   if (tokens >= 1000) return (tokens / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
   return String(tokens)
 }
+
+/**
+ * Wrap `base` in a plain object that reads every property live from `base` (methods stay
+ * bound to it, so private fields keep working) and replaces only the keys in `over`.
+ * A Proxy cannot do this: DSH hands out frozen objects whose non-writable,
+ * non-configurable properties a Proxy `get` trap must report unchanged (measured crash:
+ * "proxy must report the same value for the non-writable, non-configurable property 'views'").
+ */
+export function overlay<T extends object>(base: T, over: Record<string, unknown>): T {
+  const out: Record<PropertyKey, unknown> = {}
+  const seen = new Set<PropertyKey>()
+  for (let o: object | null = base; o !== null && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+    for (const key of Reflect.ownKeys(o)) {
+      if (key === 'constructor' || seen.has(key)) continue
+      seen.add(key)
+      if (typeof key === 'string' && Object.prototype.hasOwnProperty.call(over, key)) continue
+      Object.defineProperty(out, key, {
+        enumerable: true,
+        configurable: true,
+        get: () => {
+          const value = Reflect.get(base, key, base)
+          return typeof value === 'function' ? value.bind(base) : value
+        },
+      })
+    }
+  }
+  for (const key of Object.keys(over)) {
+    Object.defineProperty(out, key, { enumerable: true, configurable: true, value: over[key], writable: true })
+  }
+  return out as T
+}

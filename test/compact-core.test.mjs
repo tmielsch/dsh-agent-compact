@@ -11,7 +11,7 @@ const built = esbuild.buildSync({
   bundle: true, write: false, format: 'esm', platform: 'node', target: 'es2022', logLevel: 'silent',
 })
 const core = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'))
-const { computeHiding, planOrder, planEntries, visibleMembers, blockKey, isBlockKey, compactState } = core
+const { computeHiding, planOrder, planEntries, visibleMembers, blockKey, isBlockKey, compactState, overlay } = core
 
 // Rows of a small chat. anchorSeq values are log seqs. Compaction c1 replaced seqs 10..30.
 const nodes = new Map([
@@ -88,4 +88,22 @@ test('real session log: the four compactions yield blocks only where rows exist'
   const comps = readCompactions(raw.split('\n').filter(Boolean).map((l) => JSON.parse(l)))
   assert.equal(comps.length >= 3, true)
   assert.deepEqual(comps.slice(0, 3).map((c) => c.shadowedSeqs.length), [43, 38, 22])
+})
+
+// Regression (measured crash in the browser, 2026-10-29): a Proxy over DSH's frozen
+// snapshot objects throws "proxy must report the same value for the non-writable,
+// non-configurable property 'views'". `overlay` must work on exactly such objects.
+test('overlay works on frozen objects with non-writable properties and private fields', async () => {
+  class Store { #n = 7; get(key) { return key + this.#n } }
+  const views = new Store()
+  const snapshot = Object.freeze(Object.defineProperties({}, {
+    views: { value: views, writable: false, configurable: false, enumerable: true },
+    order: { value: Object.freeze(['a', 'b']), writable: false, configurable: false, enumerable: true },
+  }))
+  const wrapped = overlay(snapshot, { order: ['x'] })
+  assert.deepEqual(wrapped.order, ['x'])
+  assert.equal(wrapped.views.get('k'), 'k7') // method still bound: private field intact
+  const inner = overlay(snapshot.views, { get: () => 'over' })
+  assert.equal(inner.get('k'), 'over')
+  assert.equal(Object.keys(wrapped).includes('views'), true) // spread-safe
 })

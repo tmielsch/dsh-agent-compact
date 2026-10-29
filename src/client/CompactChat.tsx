@@ -4,6 +4,7 @@ import {
   compactState,
   computeHiding,
   isBlockKey,
+  overlay,
   planEntries,
   planOrder,
   tokensText,
@@ -20,17 +21,6 @@ type AnyProps = Record<string, any>
 
 const NO_COMPACTIONS: readonly CompactionLite[] = []
 const ABSENT = { getSnapshot: () => undefined, subscribe: () => () => {} }
-
-/** Wrap an object so methods stay bound to the original (private fields keep working). */
-function overlay<T extends object>(base: T, over: Record<string, unknown>): T {
-  return new Proxy(base, {
-    get(target, prop) {
-      if (typeof prop === 'string' && Object.prototype.hasOwnProperty.call(over, prop)) return over[prop]
-      const value = Reflect.get(target, prop, target)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  })
-}
 
 interface Derived { readonly hiding: Hiding; readonly snapshot: any }
 
