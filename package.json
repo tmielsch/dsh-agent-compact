@@ -1,6 +1,6 @@
 {
   "name": "@tmielsch/rolling-compaction",
-  "version": "0.2.1-trunk.16",
+  "version": "0.2.1-trunk.17",
   "description": "tmielsch fork of agent-compact: context compression for DeepSeek Harness where the agent writes its own span checkpoints (kept for reuse when a compaction fails), plus shared-trunk compaction for forked team members (byte-identical checkpoints, prefix caches stay shared), context_recall for the original behind every checkpoint, anchors matched against what the model actually saw, and reasoning kept out of archives and requests.",
   "type": "module",
   "main": "./lib/index.js",
