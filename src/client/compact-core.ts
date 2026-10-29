@@ -98,6 +98,49 @@ export interface Hiding {
 }
 
 /**
+ * Which original rows a compaction replaced, as inclusive seq intervals, and which other
+ * compactions enclose it.
+ *
+ * The replace range of the log (`surfaceOp.startSeq/endSeq`) is NOT reliable: when a
+ * compaction swallows an earlier checkpoint, DSH gives replacement positions the seq of
+ * their START, and the range can run backwards (measured: 6 of 8 compactions of one real
+ * session, e.g. "1853..1822"). The exact list `shadowedSeqs` is reliable. A compaction
+ * therefore covers: the span of its own shadowed events (earlier checkpoints excluded)
+ * plus, recursively, everything covered by each earlier checkpoint it swallowed.
+ */
+export function coverageOf(compactions: readonly CompactionLite[]): {
+  readonly cover: ReadonlyMap<string, ReadonlyArray<readonly [number, number]>>
+  readonly enclosing: ReadonlyMap<string, ReadonlySet<string>>
+} {
+  const byCheckpoint = new Map<number, CompactionLite>()
+  for (const c of compactions) byCheckpoint.set(c.checkpointSeq, c)
+  const enclosing = new Map<string, Set<string>>()
+  for (const c of compactions) enclosing.set(c.compactionId, new Set())
+  const walk = (c: CompactionLite, ancestors: readonly string[], seen: Set<string>): Array<readonly [number, number]> => {
+    if (seen.has(c.compactionId)) return []
+    seen.add(c.compactionId)
+    let lo = Infinity
+    let hi = -Infinity
+    for (const q of c.shadowedSeqs) {
+      if (byCheckpoint.has(q)) continue
+      if (q < lo) lo = q
+      if (q > hi) hi = q
+    }
+    const out: Array<readonly [number, number]> = lo <= hi ? [[lo, hi]] : []
+    for (const q of c.shadowedSeqs) {
+      const inner = byCheckpoint.get(q)
+      if (!inner || inner === c) continue
+      for (const a of [...ancestors, c.compactionId]) enclosing.get(inner.compactionId)?.add(a)
+      out.push(...walk(inner, [...ancestors, c.compactionId], seen))
+    }
+    return out
+  }
+  const cover = new Map<string, ReadonlyArray<readonly [number, number]>>()
+  for (const c of compactions) cover.set(c.compactionId, walk(c, [], new Set()))
+  return { cover, enclosing }
+}
+
+/**
  * Decide which rows are hidden and where each block goes.
  * A block is only produced when at least one original row of its span is loaded;
  * with no such row there is nothing on screen to replace and no correct place.
@@ -118,16 +161,19 @@ export function computeHiding(
   const rows = new Map<string, number>()
   if (compactions.length === 0) return { hidden, firstKey, lastKey, blocks, rows }
   const sorted = [...compactions].sort((a, b) => a.checkpointSeq - b.checkpointSeq)
+  const { cover, enclosing } = coverageOf(sorted)
+  const covers = (id: string, seq: number): boolean => (cover.get(id) ?? []).some(([lo, hi]) => seq >= lo && seq <= hi)
   for (const key of order) {
     const node = nodeOf(key)
-    if (!node || KEEP_KINDS.has(node.kind) || node.kind === BLOCK_KIND) continue
+    if (!node || KEEP_KINDS.has(node.kind) || node.kind === BLOCK_KIND || node.kind === END_KIND) continue
+    // A row is covered by every compaction whose span includes it (an inner and the outer
+    // one that swallowed it). It is hidden while ANY of them is collapsed.
     for (const c of sorted) {
-      if (node.anchorSeq < c.startSeq || node.anchorSeq > c.endSeq) continue
+      if (!covers(c.compactionId, node.anchorSeq)) continue
       if (!firstKey.has(c.compactionId)) firstKey.set(c.compactionId, key)
       lastKey.set(c.compactionId, key)
       rows.set(c.compactionId, (rows.get(c.compactionId) ?? 0) + 1)
       if (!expanded.has(c.compactionId)) hidden.add(key)
-      break
     }
   }
   // A turn whose whole content is hidden must not leave its header ("Completed in 12s",
@@ -155,6 +201,8 @@ export function computeHiding(
   }
   for (const c of sorted) {
     if (!firstKey.has(c.compactionId)) continue
+    // An inner compaction only shows while every compaction that swallowed it is expanded.
+    if ([...(enclosing.get(c.compactionId) ?? [])].some((outer) => !expanded.has(outer))) continue
     const open = expanded.has(c.compactionId)
     const make = (key: string, role: 'block' | 'end'): BlockNode => ({
       key,
@@ -185,6 +233,7 @@ export function computeHiding(
 /** Flat row order: hidden rows removed, each block before its span, each end bar after it. */
 export function planOrder(order: readonly string[], hiding: Hiding): readonly string[] {
   if (hiding.blocks.size === 0) return order
+  const seqOf = (key: string): number => hiding.blocks.get(key)?.anchorSeq ?? 0
   const before = new Map<string, string[]>()
   const after = new Map<string, string[]>()
   for (const [compactionId, key] of hiding.firstKey) {
@@ -198,10 +247,10 @@ export function planOrder(order: readonly string[], hiding: Hiding): readonly st
   const out: string[] = []
   for (const key of order) {
     const b = before.get(key)
-    if (b) out.push(...b)
+    if (b) out.push(...b.sort((x, y) => seqOf(y) - seqOf(x))) // outer (later checkpoint) first
     if (!hiding.hidden.has(key)) out.push(key)
     const a = after.get(key)
-    if (a) out.push(...a)
+    if (a) out.push(...a.sort((x, y) => seqOf(x) - seqOf(y))) // inner (earlier checkpoint) first
   }
   return out
 }
@@ -222,7 +271,8 @@ export function planEntries<E extends EntryLike>(
     const keys = entry.kind === 'group' ? (membersOf(entry.key) ?? []).map((m) => m.key) : [entry.key]
     const ids: string[] = []
     for (const [compactionId, k] of edge) if (keys.includes(k)) ids.push(compactionId)
-    return ids
+    const seqOf = (id: string): number => hiding.blocks.get(blockKey(id))?.anchorSeq ?? 0
+    return ids.sort((x, y) => (edge === hiding.firstKey ? seqOf(y) - seqOf(x) : seqOf(x) - seqOf(y)))
   }
   const out: (E | EntryLike)[] = []
   const placed = new Set<string>() // a bar is placed once, even if a key shows up in two entries

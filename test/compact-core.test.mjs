@@ -11,7 +11,7 @@ const built = esbuild.buildSync({
   bundle: true, write: false, format: 'esm', platform: 'node', target: 'es2022', logLevel: 'silent',
 })
 const core = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'))
-const { computeHiding, planOrder, planEntries, visibleMembers, blockKey, endKey, isBlockKey, compactState, overlay } = core
+const { coverageOf, computeHiding, planOrder, planEntries, visibleMembers, blockKey, endKey, isBlockKey, compactState, overlay } = core
 
 // Rows of a small chat. anchorSeq values are log seqs. Compaction c1 replaced seqs 10..30.
 const nodes = new Map([
@@ -60,7 +60,7 @@ test('a turn whose content is fully hidden loses its header and footer; a partly
     t('u3', 'user', 25, 3), t('p3', 'turn-process', 25.5, 3), t('a3', 'assistant-step', 35, 3), t('f3', 'turn-tail', 36, 3),
   ])
   const ord = ['u1', 'p1', 'a1', 'f1', 'u2', 'p2', 'a2', 'f2', 'u3', 'p3', 'a3', 'f3']
-  const h = computeHiding(ord, (k) => n2.get(k), [{ ...c1, startSeq: 10, endSeq: 30 }], new Set(), 's')
+  const h = computeHiding(ord, (k) => n2.get(k), [{ ...c1, startSeq: 10, endSeq: 30, shadowedSeqs: [12, 14, 25] }], new Set(), 's')
   // turn 2 lies fully inside 10..30 -> content and shells hidden; turn 3 is cut (a3 at 35 stays) -> shells stay
   assert.deepEqual([...h.hidden].sort(), ['a2', 'f2', 'p2', 'u2', 'u3'].sort())
   assert.equal(h.hidden.has('p3'), false)
@@ -70,8 +70,68 @@ test('a turn whose content is fully hidden loses its header and footer; a partly
   assert.equal(computeHiding(ord, (k) => n2.get(k), [c1], new Set(['c1']), 's').hidden.size, 0)
 })
 
+// Regression (measured 2026-10-29 on a real session): a compaction that swallowed an earlier
+// checkpoint has a replace range that runs BACKWARDS ("1853..1822"), so a start..end search
+// found no row and the compaction never showed. The coverage must come from `shadowedSeqs`.
+const nested = new Map([
+  ['u1', { key: 'u1', kind: 'user', anchorSeq: 5 }],
+  ['u2', { key: 'u2', kind: 'user', anchorSeq: 12 }],
+  ['a2', { key: 'a2', kind: 'assistant-step', anchorSeq: 20 }],
+  ['u4', { key: 'u4', kind: 'user', anchorSeq: 36 }],
+  ['a4', { key: 'a4', kind: 'assistant-step', anchorSeq: 37 }],
+  ['u5', { key: 'u5', kind: 'user', anchorSeq: 50 }],
+])
+const nestedOrder = ['u1', 'u2', 'a2', 'u4', 'a4', 'u5']
+const nestedOf = (k) => nested.get(k)
+const inner = { compactionId: 'in', checkpointSeq: 31, startSeq: 10, endSeq: 30, shadowedSeqs: [12, 20], shadowedTokenCount: 100, summaryText: 'INNER' }
+const outer = { compactionId: 'out', checkpointSeq: 60, startSeq: 40, endSeq: 35, shadowedSeqs: [31, 36, 37], shadowedTokenCount: 200, summaryText: 'OUTER' } // range backwards
+
+test('coverage comes from shadowedSeqs: the backwards range is ignored, the swallowed compaction is included', () => {
+  const { cover, enclosing } = coverageOf([inner, outer])
+  assert.deepEqual(cover.get('in'), [[12, 20]])
+  assert.deepEqual(cover.get('out'), [[36, 37], [12, 20]])
+  assert.deepEqual([...enclosing.get('in')], ['out'])
+  assert.equal(enclosing.get('out').size, 0)
+})
+
+test('nested, all collapsed: everything of the outer span hidden, only the outer block shows', () => {
+  const h = computeHiding(nestedOrder, nestedOf, [inner, outer], new Set(), 's')
+  assert.deepEqual([...h.hidden].sort(), ['a2', 'a4', 'u2', 'u4'])
+  assert.deepEqual([...h.blocks.keys()], [blockKey('out')])
+  assert.deepEqual(planOrder(nestedOrder, h), ['u1', blockKey('out'), 'u5'])
+})
+
+test('nested, outer expanded and inner collapsed: outer rows visible, inner stays one block', () => {
+  const h = computeHiding(nestedOrder, nestedOf, [inner, outer], new Set(['out']), 's')
+  assert.deepEqual([...h.hidden].sort(), ['a2', 'u2'])
+  assert.deepEqual(planOrder(nestedOrder, h), ['u1', blockKey('out'), blockKey('in'), 'u4', 'a4', endKey('out'), 'u5'])
+})
+
+test('nested, both expanded: nothing hidden, bars of the outer wrap the bars of the inner', () => {
+  const h = computeHiding(nestedOrder, nestedOf, [inner, outer], new Set(['in', 'out']), 's')
+  assert.equal(h.hidden.size, 0)
+  assert.deepEqual(planOrder(nestedOrder, h), ['u1', blockKey('out'), blockKey('in'), 'u2', 'a2', endKey('in'), 'u4', 'a4', endKey('out'), 'u5'])
+})
+
+test('real logs: every compaction has a non-empty coverage even when its range runs backwards', async () => {
+  const { readCompactions } = await import('../lib/compactions.js')
+  let checked = 0
+  for (const f of ['/tmp/cc-6d42496f-ee0e-488d-8159-6ba666404353.jsonl', '/tmp/cc-session-3ddfcb24-a7b9-4857-8910-bdedd5f3acf3.jsonl']) {
+    let raw
+    try { raw = readFileSync(f, 'utf8') } catch { continue }
+    const comps = readCompactions(raw.split('\n').filter(Boolean).map((l) => JSON.parse(l)))
+    const { cover } = coverageOf(comps)
+    for (const c of comps) {
+      assert.ok(cover.get(c.compactionId).length > 0, `${c.compactionId} has coverage`)
+      if (c.startSeq > c.endSeq) checked += 1
+    }
+  }
+  if (checked === 0) return // logs not on this machine
+  assert.ok(checked > 0)
+})
+
 test('a compaction with no loaded row gets no block (nothing to replace on screen)', () => {
-  const far = { ...c1, compactionId: 'far', startSeq: 100, endSeq: 200 }
+  const far = { ...c1, compactionId: 'far', startSeq: 100, endSeq: 200, shadowedSeqs: [100, 150, 200] }
   const h = computeHiding(order, nodeOf, [far], new Set(), 's')
   assert.equal(h.blocks.size, 0)
   assert.equal(planOrder(order, h), order)
