@@ -155,15 +155,18 @@ export function CompactChat(props: AnyProps): React.ReactElement {
 
   const allIds = React.useMemo(() => compactions.map((c) => c.compactionId), [compactions])
   const hiddenCount = active ? hidingRef.current?.hidden.size ?? 0 : 0
+  const rowsOf = hidingRef.current?.rows
+  const loaded = active ? compactions.filter((c) => (rowsOf?.get(c.compactionId) ?? 0) > 0).length : 0
+  const rowsReport = compactions.map((c) => `${c.compactionId.slice(0, 8)}:${rowsOf?.get(c.compactionId) ?? 0}/${c.shadowedSeqs.length}`).join(' ')
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 'auto', minHeight: 0, height: '100%' }}>
-      <div style={barStyle} data-compact-chat-bar="">
+      <div style={barStyle} data-compact-chat-bar="" data-compact-rows={rowsReport} title={'loaded rows / replaced items per compaction: ' + rowsReport}>
         <strong style={{ color: 'var(--dsw-alias-label-primary)' }}>Compact Chat</strong>
         <span>
           {!active
             ? (error ? `cannot read compactions: ${error}` : 'no compactions in this session')
-            : `${compactions.length} compaction${compactions.length === 1 ? '' : 's'}, ${hiddenCount} original row${hiddenCount === 1 ? '' : 's'} hidden`}
+            : `${compactions.length} compaction${compactions.length === 1 ? '' : 's'}, ${loaded} with loaded rows, ${hiddenCount} original row${hiddenCount === 1 ? '' : 's'} hidden${loaded < compactions.length ? ` (${compactions.length - loaded} lie in older history that is not loaded: scroll up, Load earlier)` : ''}`}
         </span>
         <span style={{ flex: 1 }} />
         <button type="button" style={buttonStyle} disabled={!active} onClick={() => compactState.setAll(sessionId, allIds, true)}>Expand all</button>

@@ -75,6 +75,8 @@ export interface Hiding {
   /** compactionId -> key of the first original row inside its range (where the block goes). */
   readonly firstKey: ReadonlyMap<string, string>
   readonly blocks: ReadonlyMap<string, BlockNode>
+  /** compactionId -> number of loaded original rows inside its span (0 = span not loaded). */
+  readonly rows: ReadonlyMap<string, number>
 }
 
 /**
@@ -92,7 +94,8 @@ export function computeHiding(
   const hidden = new Set<string>()
   const firstKey = new Map<string, string>()
   const blocks = new Map<string, BlockNode>()
-  if (compactions.length === 0) return { hidden, firstKey, blocks }
+  const rows = new Map<string, number>()
+  if (compactions.length === 0) return { hidden, firstKey, blocks, rows }
   const sorted = [...compactions].sort((a, b) => a.checkpointSeq - b.checkpointSeq)
   for (const key of order) {
     const node = nodeOf(key)
@@ -100,6 +103,7 @@ export function computeHiding(
     for (const c of sorted) {
       if (node.anchorSeq < c.startSeq || node.anchorSeq > c.endSeq) continue
       if (!firstKey.has(c.compactionId)) firstKey.set(c.compactionId, key)
+      rows.set(c.compactionId, (rows.get(c.compactionId) ?? 0) + 1)
       if (!expanded.has(c.compactionId)) hidden.add(key)
       break
     }
@@ -126,7 +130,7 @@ export function computeHiding(
       },
     })
   }
-  return { hidden, firstKey, blocks }
+  return { hidden, firstKey, blocks, rows }
 }
 
 /** Flat row order: hidden rows removed, each block inserted where its span began. */
