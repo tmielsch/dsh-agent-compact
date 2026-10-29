@@ -235,3 +235,28 @@ test('overlay works on frozen objects with non-writable properties and private f
   assert.equal(inner.get('k'), 'over')
   assert.equal(Object.keys(wrapped).includes('views'), true) // spread-safe
 })
+
+// Measured 2026-10-29 on Tilman's screen: a turn that is only PARTLY replaced still showed its
+// header "Completed in 12s", but opening it showed nothing, because every row of its work log
+// was hidden. DSH's work log = the turn's rows from processStartSeq up to the answer.
+test('a turn header whose whole work log is hidden is hidden too; a partly visible log keeps it', () => {
+  const mk = (key, kind, seq, turn, data) => ({ key, kind, anchorSeq: seq, turn, ...(data ? { data } : {}) })
+  const chat = new Map([
+    ['u', mk('u', 'user', 1, 7)],
+    ['p', mk('p', 'turn-process', 1.5, 7, { processStartSeq: 2, answerAnchorSeq: 10 })],
+    ['t1', mk('t1', 'tool-call', 3, 7)],
+    ['a1', mk('a1', 'assistant-step', 4, 7)],
+    ['f', mk('f', 'assistant-step', 10, 7)], // the answer: outside the log, stays visible
+    ['tail', mk('tail', 'turn-tail', 11, 7)],
+  ])
+  const keys = ['u', 'p', 't1', 'a1', 'f', 'tail']
+  const all = { compactionId: 'k', checkpointSeq: 50, startSeq: 2, endSeq: 5, shadowedSeqs: [3, 4], shadowedTokenCount: 10, summaryText: 'S' }
+  const full = computeHiding(keys, (k) => chat.get(k), [all], new Set(), 's')
+  assert.deepEqual([...full.hidden].sort(), ['a1', 'p', 't1'], 'log rows and the emptied header are hidden; user, answer and tail stay')
+  const part = { ...all, shadowedSeqs: [3], endSeq: 3 }
+  const some = computeHiding(keys, (k) => chat.get(k), [part], new Set(), 's')
+  assert.deepEqual([...some.hidden].sort(), ['t1'], 'one log row still visible: the header stays')
+  const open = computeHiding(keys, (k) => chat.get(k), [all], new Set(['k']), 's')
+  assert.equal(open.hidden.size, 0, 'expanded: nothing hidden')
+})
+

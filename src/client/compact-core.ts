@@ -33,6 +33,8 @@ export interface NodeLike {
   readonly anchorSeq: number
   /** Optional turn number, read by the default `turnOf` of `computeHiding`. */
   readonly turn?: number
+  /** Turn-process rows carry DSH's spec here: `processStartSeq`, `answerAnchorSeq`. */
+  readonly data?: unknown
 }
 
 /** Synthetic Chat node that renders one compaction block. */
@@ -203,6 +205,31 @@ export function computeHiding(
     for (const { key, turn } of shells) {
       const entry = content.get(turn)
       if (entry && entry.hiddenCount > 0 && entry.hiddenCount === entry.total) hidden.add(key)
+    }
+    // A turn that is only PARTLY replaced keeps its header ("Completed in 12s") because it still
+    // has a visible answer. But that header opens the turn's work log (tools and intermediate
+    // steps); when every row of that log is hidden, the header would open onto nothing.
+    // DSH's own rule for the log: rows of the turn from `processStartSeq` up to, not including,
+    // the answer (`answerAnchorSeq`), without the independent kinds (user, steering, ...).
+    const logRows = new Map<number, Array<{ key: string; seq: number }>>()
+    for (const key of order) {
+      const node = nodeOf(key)
+      if (!node || node.kind === BLOCK_KIND || node.kind === END_KIND || KEEP_KINDS.has(node.kind) || node.kind === 'user' || node.kind === 'steering') continue
+      const turn = turnOf(node)
+      if (turn === undefined) continue
+      const list = logRows.get(turn) ?? []
+      list.push({ key, seq: node.anchorSeq })
+      logRows.set(turn, list)
+    }
+    for (const key of order) {
+      const node = nodeOf(key)
+      if (!node || node.kind !== 'turn-process' || hidden.has(key)) continue
+      const turn = turnOf(node)
+      const spec = node.data as { processStartSeq?: number; answerAnchorSeq?: number | null } | null | undefined
+      if (turn === undefined || !spec || typeof spec.processStartSeq !== 'number') continue
+      const end = typeof spec.answerAnchorSeq === 'number' ? spec.answerAnchorSeq : Infinity
+      const members = (logRows.get(turn) ?? []).filter((r) => r.seq >= (spec.processStartSeq as number) && r.seq < end)
+      if (members.length > 0 && members.every((r) => hidden.has(r.key))) hidden.add(key)
     }
   }
   // A compaction none of whose replaced rows is shown (they were never loaded, or they are
