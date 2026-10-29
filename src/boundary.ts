@@ -144,11 +144,54 @@ function commonPrefixLen(texts: string[]): number {
 // Checkpoint-Meldungen, Laufzeit-Hinweise) — den Anfang zu verlängern ist unmöglich,
 // weil die Zeilen wortgleich sind. Der einzige Ausweg, den das Modell wirklich
 // benutzen kann, ist die Kennung; sie muss also in der Zeile stehen, die es liest.
+//
+// Fork (2026-10-29, Layer-Cake): die Zeile trägt außerdem den Schnitt-Preis. Der
+// Mensch hat entschieden, dass das Modell den Preis in Token kennen muss, bevor es
+// einen Schnitt in der Mitte wählen darf (Entscheidung 1, 2026-10-29: „würde die
+// vier so annehmen“). Der Preis ist die Zahl der Token, die nach dem Schnitt neu
+// gelesen werden — alles, was hinter dem Schnitt liegt, ist nach der Umschreibung
+// nicht mehr byte-gleich, also nicht mehr cache-gültig. Gemessen am Strata-Log: ein
+// Schnitt am Anfang kostete 108428 Token, einer in der Mitte 130562, einer am Ende
+// nur 31951. Die Zeile muss den Preis nennen, sonst rät das Modell.
+//
+// Der Preis wird aus der Zeichenlänge der Modell-Sicht geschätzt: gemessenes
+// Verhältnis 6,27 Zeichen pro Prompt-Token (1008226 saubere Zeichen / 160691
+// Prompt-Token). Die Schätzung ist eine Größenordnung, kein exakter Zähler; sie
+// reicht, weil der Preis nur die Wahl zwischen „Mitte“ und „Ende“ entscheidet.
+export const ZEICHEN_PRO_TOKEN = 6.27
+
+/** Token-Schätzung eines Knotens in der Modell-Sicht (ohne Reasoning, ohne Bilder). */
+export function nodeTokenEstimate(n: SurfaceNode): number {
+  return Math.round(nodeText(n, true).length / ZEICHEN_PRO_TOKEN)
+}
+
+/**
+ * Der Preis eines Schnitts, der den Span `si..ei` ersetzt: die Token, die nach
+ * dem Schnitt neu gelesen werden — alles hinter `ei` und der neue Checkpoint.
+ * Der Präfix vor `si` bleibt gültig, er ist nicht Teil des Preises.
+ */
+export function cutPriceTokens(nodes: SurfaceNode[], si: number, ei: number): number {
+  let sum = 0
+  for (let i = ei + 1; i < nodes.length; i++) sum += nodeTokenEstimate(nodes[i])
+  return sum
+}
+
+/**
+ * Der Preis, wenn das Modell den Span genau bis zu diesem Knoten verdichtet:
+ * alles, was hinter ihm liegt, muss nach der Umschreibung neu gelesen werden.
+ * Ein Schnitt am Ende ist damit der billigste — hinter dem letzten Knoten steht
+ * nichts. Das ist die Regel, die der Layer-Cake dem Modell nennt.
+ */
+export function tailCutPrice(nodes: SurfaceNode[], i: number): number {
+  return cutPriceTokens(nodes, 0, i)
+}
+
 function nodeSummaryLine(nodes: SurfaceNode[], i: number, skip?: number, text?: string): string {
   const full = text ?? modelViewText(nodes[i])
   const shown = skip ? full.slice(skip) : full
   const tag = skip ? ' (shared ' + skip + '-char prefix elided)' : ''
-  return 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + markerTag(nodes[i].seq) + ' | ' + nodes[i].type + tag + ': ' + preview(shown, 80)
+  const price = tailCutPrice(nodes, i)
+  return 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + markerTag(nodes[i].seq) + ' | ' + nodes[i].type + tag + ': ' + preview(shown, 80) + ' | cut price ≈ ' + price + ' tokens'
 }
 
 // Die Nachbarn einer Mehrdeutigkeit, mit Kennung: „bis genau vor diese Meldung“ ist

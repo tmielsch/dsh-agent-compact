@@ -6,6 +6,10 @@ import {
   snapEndBalanced,
   soleToolCall,
   spanText,
+  tailCutPrice,
+  cutPriceTokens,
+  nodeTokenEstimate,
+  ZEICHEN_PRO_TOKEN,
 } from '../lib/boundary.js'
 import { markerTag } from '../lib/anchor.js'
 
@@ -431,4 +435,49 @@ test('resolveBoundaries: the not-found hint carries each candidate marker too', 
   assert.match(message, /not found on the surface/)
   assert.match(message, /each with its marker/)
   assert.ok(message.includes(markerTag(1) + ' | user/message'))
+})
+
+// Layer-Cake (2026-10-29): der Schnitt-Preis. Die Zusagen, die die Anweisung
+// dem Modell nennt: ein Schnitt am Ende ist billiger als einer in der Mitte,
+// und die Kandidaten-Zeile trägt den Preis, damit das Modell vergleichen kann.
+test('tailCutPrice: a cut at the end is cheaper than a cut in the middle', () => {
+  const long = 'x'.repeat(6270) // 1000 Token bei 6,27 Zeichen/Token
+  const nodes = [
+    userNode(1, 'Anfang'),
+    assistantTextNode(2, long),
+    assistantTextNode(3, long),
+    assistantTextNode(4, 'Ende'),
+  ]
+  // Schnitt bis Knoten 1 (Mitte): alles nach ihm — zwei lange Knoten plus Ende.
+  const middle = tailCutPrice(nodes, 1)
+  // Schnitt bis Knoten 3 (Ende): nur der kurze Schwanz danach.
+  const end = tailCutPrice(nodes, 3)
+  assert.ok(end < middle, `end ${end} muss kleiner sein als middle ${middle}`)
+  // Der letzte Knoten: nichts nach ihm, Preis 0.
+  assert.equal(tailCutPrice(nodes, nodes.length - 1), 0)
+  // Die Schätzung ist eine Größenordnung: 6270 Zeichen sind ~1000 Token.
+  assert.equal(nodeTokenEstimate(nodes[1]), Math.round(long.length / ZEICHEN_PRO_TOKEN))
+  // Ein Schnitt bis Knoten 0 liest genau die Knoten 1..3 neu.
+  assert.equal(cutPriceTokens(nodes, 0, 0), nodeTokenEstimate(nodes[1]) + nodeTokenEstimate(nodes[2]) + nodeTokenEstimate(nodes[3]))
+})
+
+test('nodeSummaryLine: the candidate line carries the cut price', () => {
+  const settlement = 'Background subagent abc finished and will do no further work'
+  const nodes = [
+    userNode(1, 'Erste Anweisung: baue die Bruecke'),
+    assistantTextNode(2, settlement),
+    assistantTextNode(3, 'ack, ich baue weiter an der Bruecke'),
+    assistantTextNode(4, settlement),
+  ]
+  let message = ''
+  try {
+    resolveBoundaries(nodes, { startAnchor: 'Erste Anweisung', endAnchor: settlement })
+  } catch (err) {
+    message = err.message
+  }
+  assert.match(message, /AMBIGUOUS: 2 nodes/)
+  // Die Kandidaten- und die Nachbar-Zeile tragen den Schnitt-Preis, damit das
+  // Modell den Preis eines Schnitts in der Mitte gegen einen am Ende vergleichen
+  // kann, ohne ihn zu raten.
+  assert.match(message, /cut price ≈ \d+ tokens/)
 })
