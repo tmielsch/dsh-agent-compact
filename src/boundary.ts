@@ -135,13 +135,40 @@ function commonPrefixLen(texts: string[]): number {
   return len
 }
 
-// 匹配失败提示复用的单行摘要：`pos <下标> | seq <序号> | <类型>: <前 80 字预览>`。
+// 匹配失败提示复用的单行摘要：`pos <下标> | seq <序号> | <标记> | <类型>: <前 80 字预览>`。
 // skip>0 时表示与其它候选共享的前缀已被跳过，预览从分叉点开始（并标注跳过量）。
+//
+// Fork (2026-10-29): die Zeile trägt die Anker-Kennung des Knotens. Der Grund ist
+// gemessen: die Kandidaten einer AMBIGUOUS-Abweisung sind Harness-Meldungen, deren
+// erster Zeilenanfang vorgeschrieben ist (Fertig-Meldungen desselben Unteragenten,
+// Checkpoint-Meldungen, Laufzeit-Hinweise) — den Anfang zu verlängern ist unmöglich,
+// weil die Zeilen wortgleich sind. Der einzige Ausweg, den das Modell wirklich
+// benutzen kann, ist die Kennung; sie muss also in der Zeile stehen, die es liest.
 function nodeSummaryLine(nodes: SurfaceNode[], i: number, skip?: number, text?: string): string {
   const full = text ?? modelViewText(nodes[i])
   const shown = skip ? full.slice(skip) : full
   const tag = skip ? ' (shared ' + skip + '-char prefix elided)' : ''
-  return 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + nodes[i].type + tag + ': ' + preview(shown, 80)
+  return 'pos ' + i + ' | seq ' + nodes[i].seq + ' | ' + markerTag(nodes[i].seq) + ' | ' + nodes[i].type + tag + ': ' + preview(shown, 80)
+}
+
+// Die Nachbarn einer Mehrdeutigkeit, mit Kennung: „bis genau vor diese Meldung“ ist
+// der Weg, einen Knoten zu erhalten — die Kennung des Vorgängers ist dafür der
+// sichere Anker, und sie muss kopierbar sein, nicht nur empfohlen.
+function neighbourLines(nodes: SurfaceNode[], hits: number[]): string {
+  const lines: string[] = []
+  const seen = new Set<number>()
+  for (const i of hits) {
+    for (const j of [i - 1, i + 1]) {
+      // Die Kandidaten selbst stehen schon in der Liste über diesen Zeilen.
+      if (hits.includes(j) || seen.has(j)) continue
+      if (j < 0 || j >= nodes.length || !isEligibleAnchorNode(nodes, j)) continue
+      seen.add(j)
+      const opening = modelViewText(nodes[j]).replace(/\s+/g, ' ').slice(0, 60)
+      lines.push('  ' + markerTag(nodes[j].seq) + ' pos ' + j + ' | seq ' + nodes[j].seq + ' | ' + nodes[j].type + ': ' + preview(opening, 60))
+    }
+  }
+  if (!lines.length) return ''
+  return '\nneighbouring messages (copy a marker as the anchor, to keep one of them):\n' + lines.join('\n')
 }
 
 // 把归一化文本切成用于重叠度打分的 token：ASCII/数字按 3+ 字符的连续片段
@@ -208,11 +235,14 @@ export function resolveUniqueHit(nodes: SurfaceNode[], anchor: string, side: str
     throw new Error(
       side + ' not found on the surface: ' + preview(anchor, 120) +
         '\nOnly what was actually exchanged is on the surface. Text that stood only in your own reasoning/thinking is NOT on the surface and can never be an anchor — pick the opening words of a visible message instead (its text, a tool call with its arguments, or a team message’s body).' +
-        (hint ? '\nclosest nodes (by wording):\n' + hint : '') +
-        (tail ? '\nlast messages on the surface (copy the opening words of one):\n' + tail : ''),
+        (hint ? '\nclosest nodes (by wording, each with its marker):\n' + hint : '') +
+        (tail ? '\nlast messages on the surface (copy a marker, or the opening words of one):\n' + tail : ''),
     )
   }
-  throw new Error(side + ' is AMBIGUOUS: ' + hits.length + ' nodes start with it. Lengthen the anchor to pick one (for an attached image, quote its full handle with the sha256 id); when the candidates read the same, anchor a neighbouring message instead:\n' + hitPreview(nodes, hits))
+  throw new Error(
+    side + ' is AMBIGUOUS: ' + hits.length + ' nodes start with it. Lengthen the anchor to pick one (for an attached image, quote its full handle with the sha256 id); when the candidates read the same, copy the marker of the one you mean, or anchor a neighbouring message instead:\n' +
+      hitPreview(nodes, hits) + neighbourLines(nodes, hits),
+  )
 }
 
 export function snapStartBalanced(nodes: SurfaceNode[], si: number): number {

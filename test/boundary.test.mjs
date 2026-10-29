@@ -7,6 +7,7 @@ import {
   soleToolCall,
   spanText,
 } from '../lib/boundary.js'
+import { markerTag } from '../lib/anchor.js'
 
 // ---- 合成 surface 节点：形状对齐真实 session surface 事件（见 src/boundary.ts
 // 依赖的 nodeContent/blockText 契约），不需要真的会话/服务即可单测。 ----
@@ -365,4 +366,69 @@ test('resolveBoundaries: der Belegfall vom 15.10. kann nicht mehr passieren', ()
 test('resolveBoundaries: eine Oberflaeche aus lauter Systemknoten wird abgelehnt', () => {
   const nodes = [systemNode(8, 'nur der Prompt'), systemNode(9, 'noch ein Hinweis')]
   assert.throws(() => resolveBoundaries(nodes, { endAnchor: 'noch ein Hinweis' }), /nothing but system messages/)
+})
+
+// ---- Fork 2026-10-29: Kennungen in den Kandidaten- und Nachbar-Zeilen ----
+// Gemessen: die Kandidaten einer AMBIGUOUS-Abweisung sind Harness-Meldungen,
+// deren erste Zeile vorgeschrieben ist — zwei Fertig-Meldungen desselben
+// Unteragenten sind wortgleich, also ist "verlaengere den Anker" dort kein
+// Ausweg. Der einzige Anker, der genau einen Knoten trifft, ist die Kennung;
+// sie muss in den Zeilen stehen, die das Modell beim Fehlschlag liest.
+
+test('resolveBoundaries: AMBIGUOUS candidates each carry their anchor marker, and a copied marker resolves', () => {
+  const nodes = [userNode(1, 'do the thing now'), userNode(2, 'do the thing again')]
+  let message = ''
+  try {
+    resolveBoundaries(nodes, { endAnchor: 'do the thing' })
+  } catch (err) {
+    message = err.message
+  }
+  assert.match(message, /AMBIGUOUS: 2 nodes/)
+  const lines = message.split('\n').filter((l) => l.startsWith('pos '))
+  assert.equal(lines.length, 2)
+  const markers = lines.map((l) => /\[a[0-9a-f]{6}\]/.exec(l)[0])
+  assert.equal(markers.length, 2)
+  assert.notEqual(markers[0], markers[1])
+  // Der Marker aus der Kandidaten-Zeile ist ein Anker, der genau einen Knoten
+  // trifft — dieselbe Abweisung, die den Text-Anker nicht auflösen konnte,
+  // löst mit der Kennung sauber auf.
+  const r = resolveBoundaries(nodes, { startAnchor: 'do the thing now', endAnchor: markers[1] })
+  assert.equal(r.endSeq, 2)
+})
+
+test('resolveBoundaries: AMBIGUOUS lists the neighbouring markers, and the predecessor keeps the candidate', () => {
+  const settlement = 'Background subagent abc finished and will do no further work'
+  const nodes = [
+    userNode(1, 'Erste Anweisung: baue die Bruecke'),
+    assistantTextNode(2, settlement),
+    assistantTextNode(3, 'ack, ich baue weiter an der Bruecke'),
+    assistantTextNode(4, settlement),
+  ]
+  let message = ''
+  try {
+    resolveBoundaries(nodes, { startAnchor: 'Erste Anweisung', endAnchor: settlement })
+  } catch (err) {
+    message = err.message
+  }
+  assert.match(message, /AMBIGUOUS: 2 nodes/)
+  assert.match(message, /neighbouring messages/)
+  // Der Vorgänger des zweiten Kandidaten ist die Meldung, die bei „bis genau
+  // davor“ erhalten bleiben soll; ihre Kennung steht kopierbar in der Meldung.
+  assert.ok(message.includes(markerTag(3) + ' pos 2 | seq 3 | assistant/message'))
+  // Der kopierte Vorgänger-Marker ist der Anker, der den Kandidaten erhält.
+  const r = resolveBoundaries(nodes, { startAnchor: 'Erste Anweisung', endAnchor: markerTag(3) })
+  assert.equal(r.endSeq, 3)
+})
+
+test('resolveBoundaries: the not-found hint carries each candidate marker too', () => {
+  const nodes = [userNode(1, 'Die Leseliste ist durchgearbeitet.'), userNode(2, 'weiter')]
+  let message = ''
+  try {
+    resolveBoundaries(nodes, { endAnchor: 'Die Leseliste ist durchgearbeitet und abgelegt' })
+  } catch (err) {
+    message = err.message
+  }
+  assert.match(message, /not found on the surface/)
+  assert.match(message, /each with its marker/)
+  assert.ok(message.includes(markerTag(1) + ' | user/message'))
 })

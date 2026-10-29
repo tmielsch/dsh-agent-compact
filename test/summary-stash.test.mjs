@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { SummaryStash, keptLabel, matchKept, KEEP } from '../lib/summary-stash.js'
+import { SummaryStash, keptLabel, matchKept, matchNeighbourKept, KEEP } from '../lib/summary-stash.js'
 
 // ---- SummaryStash: der Text eines Fehlschlags bleibt erhalten, der
 // Wiederversuch nimmt ihn ohne summary wieder auf (gemeldet 2026-10-20:
@@ -87,4 +87,78 @@ test('keptLabel: names the range when known, else the anchor', () => {
   const long = 'x'.repeat(80)
   const label = keptLabel({ text: 'A', endAnchor: long })
   assert.ok(label.includes('…') && label.length < 80)
+})
+
+// ---- Regel 4 (gemeldet 2026-10-29): der von der AMBIGUOUS-Meldung empfohlene
+// Wiederversuch. Der Fehlschlag schrieb den Text für eine Spanne, deren Ende auf
+// einem der Kandidaten sass; der Wiederversuch endet auf dessen Vorgänger, also
+// genau einen Knoten kürzer. Das ist dieselbe Verdichtung, und die bisherigen
+// drei Regeln erkennen sie nicht, weil der Anker ein anderer ist. ----
+
+const settlement = 'Background subagent abc finished and will do no further work'
+// Die Regel bekommt die Kandidaten-Liste, nicht einen eindeutigen Treffer:
+// der gemeldete Fall ist mehrdeutig — zwei wortgleiche Fertig-Meldungen
+// desselben Unteragenten, also zwei seq für denselben Anker.
+const resolve4 = (anchor) => {
+  if (anchor.startsWith('Background subagent abc')) return [2, 4]
+  if (anchor.startsWith('Erste Anweisung')) return [1]
+  if (anchor.startsWith('ack, ich baue weiter')) return [3]
+  return []
+}
+
+test('matchNeighbourKept: the retry that ends on the predecessor of the candidate reuses the kept text', () => {
+  const entries = [{ text: 'A', startAnchor: 'Erste Anweisung', endAnchor: settlement }]
+  const hit = matchNeighbourKept(entries, { startAnchor: 'Erste Anweisung', endAnchor: 'ack, ich baue weiter', startSeq: 1, endSeq: 3 }, 4, resolve4)
+  assert.equal(hit && hit.text, 'A')
+})
+
+test('matchNeighbourKept: a neighbour two steps away is not the same compaction', () => {
+  const entries = [{ text: 'A', startAnchor: 'Erste Anweisung', endAnchor: settlement }]
+  const hit = matchNeighbourKept(entries, { startAnchor: 'Erste Anweisung', endAnchor: 'ack, ich baue weiter', startSeq: 1, endSeq: 2 }, 3, resolve4)
+  assert.equal(hit, null)
+})
+
+test('matchNeighbourKept: an entry with a resolved range never matches by the neighbour rule', () => {
+  const entries = [{ text: 'A', startSeq: 1, endSeq: 4, endAnchor: settlement }]
+  assert.equal(matchNeighbourKept(entries, { startAnchor: 'Erste Anweisung', endAnchor: 'ack, ich baue weiter', startSeq: 1, endSeq: 3 }, 4, resolve4), null)
+})
+
+test('matchNeighbourKept: a different start anchor is a different compaction', () => {
+  const entries = [{ text: 'A', startAnchor: 'Erste Anweisung', endAnchor: settlement }]
+  const hit = matchNeighbourKept(entries, { startAnchor: 'ack, ich baue weiter', endAnchor: settlement, startSeq: 3, endSeq: 4 }, 5, resolve4)
+  assert.equal(hit, null)
+})
+
+test('matchNeighbourKept: an entry without a start anchor matches any start', () => {
+  const entries = [{ text: 'A', endAnchor: settlement }]
+  const hit = matchNeighbourKept(entries, { endAnchor: 'ack, ich baue weiter', startSeq: 7, endSeq: 3 }, 4, resolve4)
+  assert.equal(hit && hit.text, 'A')
+})
+
+test('matchNeighbourKept: no next node (the span ends at the surface tail) matches nothing', () => {
+  const entries = [{ text: 'A', endAnchor: settlement }]
+  assert.equal(matchNeighbourKept(entries, { endAnchor: 'ack, ich baue weiter', startSeq: 1, endSeq: 4 }, null, resolve4), null)
+})
+
+test('matchNeighbourKept: the kept endAnchor is ambiguous and the retry keeps the FIRST candidate', () => {
+  // Der gemeldete Fall: die Fertig-Meldungen sind wortgleich, der gehaltene
+  // endAnchor löst auf zwei Knoten auf. Der Wiederversuch endet vor dem
+  // ersten von ihnen — auch das ist dieselbe Verdichtung.
+  const entries = [{ text: 'A', startAnchor: 'Erste Anweisung', endAnchor: settlement }]
+  const hit = matchNeighbourKept(entries, { startAnchor: 'Erste Anweisung', endAnchor: 'weiter', startSeq: 1, endSeq: 1 }, 2, resolve4)
+  assert.equal(hit && hit.text, 'A')
+})
+
+test('matchNeighbourKept: a retry that ends away from every candidate is a different compaction', () => {
+  const entries = [{ text: 'A', startAnchor: 'Erste Anweisung', endAnchor: settlement }]
+  const hit = matchNeighbourKept(entries, { startAnchor: 'Erste Anweisung', endAnchor: 'ack, ich baue weiter', startSeq: 1, endSeq: 4 }, 5, resolve4)
+  assert.equal(hit, null)
+})
+
+test('stash: takeNeighbourMatched consumes the entry once', () => {
+  const stash = new SummaryStash()
+  stash.save('s1', { text: 'A', startAnchor: 'Erste Anweisung', endAnchor: settlement })
+  const span = { startAnchor: 'Erste Anweisung', endAnchor: 'ack, ich baue weiter', startSeq: 1, endSeq: 3 }
+  assert.equal(stash.takeNeighbourMatched('s1', span, 4, resolve4)?.text, 'A')
+  assert.equal(stash.takeNeighbourMatched('s1', span, 4, resolve4), null)
 })
