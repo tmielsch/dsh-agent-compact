@@ -120,12 +120,14 @@ export function CompactChat(props: AnyProps): React.ReactElement {
   const expanded = compactState.expanded(sessionId)
   const active = compactions.length > 0
   const hidingRef = React.useRef<Hiding | null>(null)
+  const rawRef = React.useRef<any>(null)
   if (!active) hidingRef.current = null
 
   const useChat = React.useCallback((selector: (s: any) => any, equal?: any) => props.useChat((snapshot: any) => {
     if (!active) return selector(snapshot)
     const d = derive(snapshot, compactions, expanded, sessionId)
     hidingRef.current = d.hiding
+    rawRef.current = snapshot
     return selector(d.snapshot)
   }, equal), [props.useChat, active, compactions, expanded, sessionId])
 
@@ -171,11 +173,29 @@ export function CompactChat(props: AnyProps): React.ReactElement {
   const hiddenCount = active ? hidingRef.current?.hidden.size ?? 0 : 0
   const rowsOf = hidingRef.current?.rows
   const loaded = active ? compactions.filter((c) => (rowsOf?.get(c.compactionId) ?? 0) > 0).length : 0
+  // Diagnostics for the browser console: how many chat rows are loaded and which log
+  // numbers (anchorSeq) they carry. `document.querySelector('[data-compact-chat-bar]').dataset.compactDiag`
+  const diag = (() => {
+    const raw = rawRef.current
+    if (!raw || !raw.order) return 'no snapshot yet'
+    const seqs: number[] = []
+    const kinds = new Map<string, number>()
+    for (const key of raw.order as string[]) {
+      const n = raw.nodes.get(key)
+      if (!n) continue
+      kinds.set(n.kind, (kinds.get(n.kind) ?? 0) + 1)
+      if (typeof n.anchorSeq === 'number') seqs.push(n.anchorSeq)
+    }
+    seqs.sort((a, b) => a - b)
+    const pick = (list: number[]) => list.slice(0, 6).map((x) => Math.round(x * 10) / 10).join(',')
+    const cov = compactions.map((c) => `${c.compactionId.slice(0, 8)}=${c.shadowedSeqs.length ? Math.min(...c.shadowedSeqs) + '..' + Math.max(...c.shadowedSeqs) : 'none'}`).join(' ')
+    return `rows=${seqs.length} anchor min=${seqs[0]} max=${seqs[seqs.length - 1]} first=[${pick(seqs)}] last=[${pick(seqs.slice(-6))}] kinds={${[...kinds].map(([k, v]) => k + ':' + v).join(',')}} shadowed ${cov}`
+  })()
   const rowsReport = compactions.map((c) => `${c.compactionId.slice(0, 8)}:${rowsOf?.get(c.compactionId) ?? 0}/${c.shadowedSeqs.length}`).join(' ')
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 'auto', minHeight: 0, height: '100%' }}>
-      <div style={barStyle} data-compact-chat-bar="" data-compact-rows={rowsReport} title={'loaded rows / replaced items per compaction: ' + rowsReport}>
+      <div style={barStyle} data-compact-chat-bar="" data-compact-rows={rowsReport} data-compact-diag={diag} title={'loaded rows / replaced items per compaction: ' + rowsReport}>
         <strong style={{ color: 'var(--dsw-alias-label-primary)' }}>Compact Chat</strong>
         <span>
           {!active
