@@ -50,6 +50,26 @@ test('collapsed has no end bar and the block carries open=false', () => {
   assert.equal(h.blocks.get(blockKey('c1')).data.role, 'block')
 })
 
+// Regression (Tilman's screenshot, 2026-10-29 20:51): after hiding the originals, the turn's
+// "Completed in 12s" header (turn-process) and usage footer (turn-tail) stayed as empty shells.
+test('a turn whose content is fully hidden loses its header and footer; a partly hidden turn keeps them', () => {
+  const t = (key, kind, anchorSeq, turn) => [key, { key, kind, anchorSeq, turn }]
+  const n2 = new Map([
+    t('u1', 'user', 5, 1), t('p1', 'turn-process', 5.5, 1), t('a1', 'assistant-step', 6, 1), t('f1', 'turn-tail', 7, 1),
+    t('u2', 'user', 12, 2), t('p2', 'turn-process', 12.5, 2), t('a2', 'assistant-step', 14, 2), t('f2', 'turn-tail', 15, 2),
+    t('u3', 'user', 25, 3), t('p3', 'turn-process', 25.5, 3), t('a3', 'assistant-step', 35, 3), t('f3', 'turn-tail', 36, 3),
+  ])
+  const ord = ['u1', 'p1', 'a1', 'f1', 'u2', 'p2', 'a2', 'f2', 'u3', 'p3', 'a3', 'f3']
+  const h = computeHiding(ord, (k) => n2.get(k), [{ ...c1, startSeq: 10, endSeq: 30 }], new Set(), 's')
+  // turn 2 lies fully inside 10..30 -> content and shells hidden; turn 3 is cut (a3 at 35 stays) -> shells stay
+  assert.deepEqual([...h.hidden].sort(), ['a2', 'f2', 'p2', 'u2', 'u3'].sort())
+  assert.equal(h.hidden.has('p3'), false)
+  assert.equal(h.hidden.has('f3'), false)
+  assert.equal(h.hidden.has('p1'), false) // untouched turn
+  // expanded: nothing hidden at all
+  assert.equal(computeHiding(ord, (k) => n2.get(k), [c1], new Set(['c1']), 's').hidden.size, 0)
+})
+
 test('a compaction with no loaded row gets no block (nothing to replace on screen)', () => {
   const far = { ...c1, compactionId: 'far', startSeq: 100, endSeq: 200 }
   const h = computeHiding(order, nodeOf, [far], new Set(), 's')

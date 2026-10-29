@@ -23,6 +23,14 @@ type AnyProps = Record<string, any>
 const NO_COMPACTIONS: readonly CompactionLite[] = []
 const ABSENT = { getSnapshot: () => undefined, subscribe: () => () => {} }
 
+/** Turn number of a DSH Chat node: `location.turn.turn` for rows inside a turn, `data.turn` for turn rows. */
+function dshTurnOf(node: NodeLike): number | undefined {
+  const n = node as any
+  const loc = n.location
+  if (loc && (loc.kind === 'turn' || loc.kind === 'step') && typeof loc.turn?.turn === 'number') return loc.turn.turn
+  return typeof n.data?.turn === 'number' ? n.data.turn : undefined
+}
+
 interface Derived { readonly hiding: Hiding; readonly snapshot: any }
 
 /** Filtered Chat snapshot, memoised per (base snapshot, compactions, expand state). */
@@ -30,7 +38,7 @@ const derivedCache = new WeakMap<object, { comps: readonly CompactionLite[]; exp
 function derive(snapshot: any, comps: readonly CompactionLite[], expanded: ReadonlySet<string>, sessionId: string): Derived {
   const hit = derivedCache.get(snapshot)
   if (hit && hit.comps === comps && hit.expanded === expanded && hit.sessionId === sessionId) return hit.value
-  const hiding = computeHiding(snapshot.order, (key) => snapshot.nodes.get(key) as NodeLike | undefined, comps, expanded, sessionId)
+  const hiding = computeHiding(snapshot.order, (key) => snapshot.nodes.get(key) as NodeLike | undefined, comps, expanded, sessionId, dshTurnOf)
   const order = planOrder(snapshot.order, hiding)
   const blocks = hiding.blocks
   const nodes = overlay(snapshot.nodes, {

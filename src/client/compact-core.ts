@@ -31,6 +31,8 @@ export interface NodeLike {
   readonly key: string
   readonly kind: string
   readonly anchorSeq: number
+  /** Optional turn number, read by the default `turnOf` of `computeHiding`. */
+  readonly turn?: number
 }
 
 /** Synthetic Chat node that renders one compaction block. */
@@ -106,6 +108,8 @@ export function computeHiding(
   compactions: readonly CompactionLite[],
   expanded: ReadonlySet<string>,
   sessionId: string,
+  /** Turn number of a node (DSH: `node.location.turn.turn`, or `node.data.turn` for turn rows). */
+  turnOf: (node: NodeLike) => number | undefined = (node) => node.turn,
 ): Hiding {
   const hidden = new Set<string>()
   const firstKey = new Map<string, string>()
@@ -124,6 +128,29 @@ export function computeHiding(
       rows.set(c.compactionId, (rows.get(c.compactionId) ?? 0) + 1)
       if (!expanded.has(c.compactionId)) hidden.add(key)
       break
+    }
+  }
+  // A turn whose whole content is hidden must not leave its header ("Completed in 12s",
+  // kind turn-process) or its footer (usage line, kind turn-tail) behind: they would be empty
+  // shells. Turns that keep at least one visible row keep both.
+  if (hidden.size > 0) {
+    const content = new Map<number, { total: number; hiddenCount: number }>()
+    const shells: Array<{ key: string; turn: number }> = []
+    for (const key of order) {
+      const node = nodeOf(key)
+      if (!node || node.kind === BLOCK_KIND || node.kind === END_KIND) continue
+      const turn = turnOf(node)
+      if (turn === undefined) continue
+      if (node.kind === 'turn-process' || node.kind === 'turn-tail') { shells.push({ key, turn }); continue }
+      if (KEEP_KINDS.has(node.kind)) continue
+      const entry = content.get(turn) ?? { total: 0, hiddenCount: 0 }
+      entry.total += 1
+      if (hidden.has(key)) entry.hiddenCount += 1
+      content.set(turn, entry)
+    }
+    for (const { key, turn } of shells) {
+      const entry = content.get(turn)
+      if (entry && entry.hiddenCount > 0 && entry.hiddenCount === entry.total) hidden.add(key)
     }
   }
   for (const c of sorted) {
