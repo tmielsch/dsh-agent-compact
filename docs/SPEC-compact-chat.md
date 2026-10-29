@@ -68,3 +68,4 @@ The Compact Chat does not depend on DSH's own `compaction` rows in the DOM. Per 
 ## 6. Change log
 
 - 2026-10-29 Draft 1 written from Tilman's messages of the day. Awaiting his review.
+- 2026-10-29 Draft 1 approved by Tilman ("freigegeben und go"). Probe 0.2.1-trunk.16.compactchat.1 built on `feature/compact-chat` (commit 15a3e43): server remote `ctxSurface.compactions`, tab "Compact Chat" (route B: DSH's own Chat component over a filtered snapshot), chat node kind `compact-block`, buttons Expand all / Collapse all, old tab labelled "Model Context". 122 offline tests green (log reader against the real session log: 43/38/22 items). NOT yet seen in a browser: Q2 (node anchorSeq vs log seq), Q4 (input field in the new tab), looks, and whether DSH accepts the borrowed `children`/`store` of the Chat entry.
