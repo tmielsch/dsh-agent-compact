@@ -130,11 +130,29 @@ test('real logs: every compaction has a non-empty coverage even when its range r
   assert.ok(checked > 0)
 })
 
-test('a compaction with no loaded row gets no block (nothing to replace on screen)', () => {
-  const far = { ...c1, compactionId: 'far', startSeq: 100, endSeq: 200, shadowedSeqs: [100, 150, 200] }
-  const h = computeHiding(order, nodeOf, [far], new Set(), 's')
-  assert.equal(h.blocks.size, 0)
-  assert.equal(planOrder(order, h), order)
+test('a compaction whose rows are not shown gets a block where its checkpoint lies in time', () => {
+  // replaced events are kinds the chat does not draw (time/runtime context): no row of the span exists
+  const ghost = { ...c1, compactionId: 'ghost', checkpointSeq: 31, startSeq: 100, endSeq: 200, shadowedSeqs: [100, 150, 200] }
+  const h = computeHiding(order, nodeOf, [ghost], new Set(), 's')
+  assert.equal(h.hidden.size, 0)
+  assert.equal(h.blocks.get(blockKey('ghost')).data.rowsLoaded, 0)
+  assert.equal(h.blocks.get(blockKey('ghost')).data.open, false)
+  // placed before the first visible row after the checkpoint (u3 at 40), not at the top
+  assert.deepEqual(planOrder(order, h), ['u1', 'u2', 'p2', 'a2', 't2', blockKey('ghost'), 'u3'])
+  // expanding has nothing to show: still no open state, no end bar
+  const open = computeHiding(order, nodeOf, [ghost], new Set(['ghost']), 's')
+  assert.equal(open.blocks.get(blockKey('ghost')).data.open, false)
+  assert.equal(open.blocks.has(endKey('ghost')), false)
+})
+
+test('a compaction after the last row goes to the end; one before the loaded window is left out', () => {
+  const late = { ...c1, compactionId: 'late', checkpointSeq: 99, startSeq: 90, endSeq: 98, shadowedSeqs: [90, 98] }
+  const early = { ...c1, compactionId: 'early', checkpointSeq: 2, startSeq: 1, endSeq: 1, shadowedSeqs: [1] }
+  const h = computeHiding(order, nodeOf, [early, late], new Set(), 's')
+  assert.deepEqual([...h.blocks.keys()], [blockKey('late')])
+  assert.deepEqual(planOrder(order, h), [...order, blockKey('late')])
+  const entries = planEntries(order.map((k) => ({ kind: 'node', key: k })), () => undefined, h)
+  assert.equal(entries.at(-1).key, blockKey('late'))
 })
 
 test('no compactions: identity (the tab equals the normal chat)', () => {

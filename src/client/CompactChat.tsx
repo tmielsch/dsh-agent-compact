@@ -271,7 +271,8 @@ export function CompactBlockView(props: AnyProps): React.ReactElement | null {
   const Markdown = React.useMemo(loadMarkdownText, [])
   if (!node || (node.kind !== BLOCK_KIND && node.kind !== END_KIND)) return null
   const { sessionId, compactionId, summaryText, itemCount, tokens } = node.data
-  const open = compactState.expanded(sessionId).has(compactionId)
+  const rowsLoaded = node.data.rowsLoaded
+  const open = rowsLoaded > 0 && compactState.expanded(sessionId).has(compactionId)
   const amount = `${itemCount} items (~${tokensText(tokens)} tokens)`
   const collapse = () => compactState.toggle(sessionId, compactionId)
 
@@ -287,15 +288,20 @@ export function CompactBlockView(props: AnyProps): React.ReactElement | null {
 
   return (
     <div data-compact-block={compactionId} data-compact-state="collapsed" style={{ margin: '10px 0' }}>
-      <div style={metaStyle}>Context compacted: {amount}. This checkpoint is what the model reads instead of the originals.</div>
+      <div style={metaStyle}>
+        Context compacted: {amount}. This checkpoint is what the model reads instead of the originals.
+        {rowsLoaded === 0 ? ' The original messages are not shown in this chat (not loaded, or not a kind the chat draws).' : ''}
+      </div>
       {!summaryText
         ? <div style={{ color: 'var(--dsw-alias-label-secondary)' }}>(no checkpoint text in the log)</div>
         : Markdown
           ? <Markdown text={summaryText} labels={labels} />
           : <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{summaryText}</div>}
-      <div style={{ marginTop: 6 }}>
-        <button type="button" style={linkButtonStyle} onClick={collapse} aria-expanded={false}>Expand original context</button>
-      </div>
+      {rowsLoaded > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <button type="button" style={linkButtonStyle} onClick={collapse} aria-expanded={false}>Expand original context</button>
+        </div>
+      )}
     </div>
   )
 }

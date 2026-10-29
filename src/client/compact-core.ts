@@ -51,6 +51,8 @@ export interface BlockNode extends NodeLike {
     readonly endSeq: number
     /** true: originals are shown, this row is the thin start bar; false: the checkpoint message. */
     readonly open: boolean
+    /** Number of original rows of this span that the chat shows (0 = nothing to expand). */
+    readonly rowsLoaded: number
     /** 'start' bar / checkpoint block, or 'end' bar. */
     readonly role: 'block' | 'end'
   }
@@ -93,6 +95,8 @@ export interface Hiding {
   /** compactionId -> key of the last original row inside its range (where the end bar goes). */
   readonly lastKey: ReadonlyMap<string, string>
   readonly blocks: ReadonlyMap<string, BlockNode>
+  /** Compactions placed after every row (their checkpoint lies after the last row). */
+  readonly atEnd: readonly string[]
   /** compactionId -> number of loaded original rows inside its span (0 = span not loaded). */
   readonly rows: ReadonlyMap<string, number>
 }
@@ -159,12 +163,14 @@ export function computeHiding(
   const lastKey = new Map<string, string>()
   const blocks = new Map<string, BlockNode>()
   const rows = new Map<string, number>()
-  if (compactions.length === 0) return { hidden, firstKey, lastKey, blocks, rows }
+  if (compactions.length === 0) return { hidden, firstKey, lastKey, blocks, atEnd: [], rows }
   const sorted = [...compactions].sort((a, b) => a.checkpointSeq - b.checkpointSeq)
   const { cover, enclosing } = coverageOf(sorted)
   const covers = (id: string, seq: number): boolean => (cover.get(id) ?? []).some(([lo, hi]) => seq >= lo && seq <= hi)
+  let loadedMin = Infinity // smallest log seq among the rows the chat has loaded
   for (const key of order) {
     const node = nodeOf(key)
+    if (node && node.kind !== BLOCK_KIND && node.kind !== END_KIND && node.anchorSeq < loadedMin) loadedMin = node.anchorSeq
     if (!node || KEEP_KINDS.has(node.kind) || node.kind === BLOCK_KIND || node.kind === END_KIND) continue
     // A row is covered by every compaction whose span includes it (an inner and the outer
     // one that swallowed it). It is hidden while ANY of them is collapsed.
@@ -199,11 +205,28 @@ export function computeHiding(
       if (entry && entry.hiddenCount > 0 && entry.hiddenCount === entry.total) hidden.add(key)
     }
   }
+  // A compaction none of whose replaced rows is shown (they were never loaded, or they are
+  // kinds the chat does not draw, e.g. time/runtime context) still happened at a point in the
+  // conversation: place its block where its checkpoint lies in time. Compactions that lie
+  // before the loaded window stay out (older history is not loaded).
+  const atEnd: string[] = []
   for (const c of sorted) {
-    if (!firstKey.has(c.compactionId)) continue
+    if (firstKey.has(c.compactionId) || !(c.checkpointSeq >= loadedMin)) continue
+    let at: string | undefined
+    for (const key of order) {
+      const n = nodeOf(key)
+      if (!n || n.kind === BLOCK_KIND || n.kind === END_KIND || hidden.has(key)) continue
+      if (n.anchorSeq > c.checkpointSeq) { at = key; break }
+    }
+    if (at !== undefined) firstKey.set(c.compactionId, at)
+    else atEnd.push(c.compactionId)
+  }
+  for (const c of sorted) {
+    if (!firstKey.has(c.compactionId) && !atEnd.includes(c.compactionId)) continue
     // An inner compaction only shows while every compaction that swallowed it is expanded.
     if ([...(enclosing.get(c.compactionId) ?? [])].some((outer) => !expanded.has(outer))) continue
-    const open = expanded.has(c.compactionId)
+    const rowsLoaded = rows.get(c.compactionId) ?? 0
+    const open = expanded.has(c.compactionId) && rowsLoaded > 0
     const make = (key: string, role: 'block' | 'end'): BlockNode => ({
       key,
       kind: role === 'end' ? END_KIND : BLOCK_KIND,
@@ -221,13 +244,14 @@ export function computeHiding(
         startSeq: c.startSeq,
         endSeq: c.endSeq,
         open,
+        rowsLoaded,
         role,
       },
     })
     blocks.set(blockKey(c.compactionId), make(blockKey(c.compactionId), 'block'))
     if (open) blocks.set(endKey(c.compactionId), make(endKey(c.compactionId), 'end'))
   }
-  return { hidden, firstKey, lastKey, blocks, rows }
+  return { hidden, firstKey, lastKey, blocks, atEnd, rows }
 }
 
 /** Flat row order: hidden rows removed, each block before its span, each end bar after it. */
@@ -252,6 +276,7 @@ export function planOrder(order: readonly string[], hiding: Hiding): readonly st
     const a = after.get(key)
     if (a) out.push(...a.sort((x, y) => seqOf(x) - seqOf(y))) // inner (earlier checkpoint) first
   }
+  for (const id of hiding.atEnd) if (hiding.blocks.has(blockKey(id))) out.push(blockKey(id))
   return out
 }
 
@@ -291,6 +316,7 @@ export function planEntries<E extends EntryLike>(
     }
     for (const id of touching(entry, hiding.lastKey)) place(endKey(id))
   }
+  for (const id of hiding.atEnd) place(blockKey(id))
   return out
 }
 
