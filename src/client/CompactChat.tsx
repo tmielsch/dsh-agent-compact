@@ -216,3 +216,47 @@ export function CompactBlockView(props: AnyProps): React.ReactElement | null {
     </div>
   )
 }
+
+// ---- diagnostics: a crash inside the tab must show WHY instead of an empty pane ----
+
+const NEEDED_PROPS = ['ChatView', 'sessionId', 'useChat', 'useConversation', 'useChatNode', 'useChatNodeProcess', 'useChatGroup', 'useSession', 'useStore', 'renderSlot']
+
+class CrashBoundary extends React.Component<{ propNames: string; children?: React.ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null }
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error }
+  }
+  componentDidCatch(error: Error): void {
+    console.error('[rolling-compaction] Compact Chat crashed:', error)
+  }
+  render(): React.ReactNode {
+    const { error } = this.state
+    if (!error) return this.props.children
+    return (
+      <div data-compact-chat-crash="" style={{ padding: 16, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>
+        <strong style={{ color: 'var(--dsw-alias-state-error-primary, #e5484d)' }}>Compact Chat crashed: {error.message}</strong>
+        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', userSelect: 'text' }}>{String(error.stack || '').slice(0, 1800)}</pre>
+        <div>props seen: {this.props.propNames}</div>
+      </div>
+    )
+  }
+}
+
+/** Registered tab component: the real tab inside a crash boundary that reports the reason. */
+export function CompactChatRoot(props: AnyProps): React.ReactElement {
+  const names = Object.keys(props).sort()
+  const missing = NEEDED_PROPS.filter((n) => props[n] === undefined)
+  if (missing.length > 0) {
+    return (
+      <div data-compact-chat-crash="" style={{ padding: 16, fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>
+        <strong style={{ color: 'var(--dsw-alias-state-error-primary, #e5484d)' }}>Compact Chat cannot start: missing props {missing.join(', ')}</strong>
+        <div>props seen: {names.join(', ')}</div>
+      </div>
+    )
+  }
+  return (
+    <CrashBoundary propNames={names.join(', ')}>
+      <CompactChat {...props} />
+    </CrashBoundary>
+  )
+}

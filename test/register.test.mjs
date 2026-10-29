@@ -11,7 +11,7 @@ const stubViews = {
   name: 'stub-views',
   setup(build) {
     build.onResolve({ filter: /CompactChat\.js$/ }, () => ({ path: 'stub-views', namespace: 'stub' }))
-    build.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: 'export const CompactChat = function CompactChat(){}; export const CompactBlockView = function CompactBlockView(){}', loader: 'js' }))
+    build.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: 'export const CompactChatRoot = function CompactChatRoot(){}; export const CompactChat = function CompactChat(){}; export const CompactBlockView = function CompactBlockView(){}', loader: 'js' }))
   },
 }
 const built = await esbuild.build({

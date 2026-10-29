@@ -9,7 +9,7 @@
 // `locale`, `children` fields). It fails soft: if the `chat` entry is missing or
 // anything throws, no tab is added and the normal Chat is never touched.
 
-import { CompactBlockView, CompactChat } from './CompactChat.js'
+import { CompactBlockView, CompactChatRoot } from './CompactChat.js'
 import { BLOCK_KIND } from './compact-core.js'
 
 const TAB_ID = 'compact-chat'
@@ -60,7 +60,7 @@ export function registerCompactChat(slots: SlotsLike, readCompactions: (request:
         ...(chat.store !== undefined ? { store: chat.store } : {}),
         ...(chat.locale !== undefined ? { locale: chat.locale } : {}),
         inject,
-      }, CompactChat)
+      }, CompactChatRoot)
       mine = slots.entries('conversation.view').find((e) => e.options && e.options.id === TAB_ID)
       if (mine && chat.children) mine.children = chat.children
     } catch (error) {
