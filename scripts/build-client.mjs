@@ -96,6 +96,28 @@ const tail = `
 					create: () => _ctxSurface_read_result$schema,
 				},
 				sourceLocation: { file: 'src/ctx-surface.ts', line: 181, column: 3 },
+			}, {
+				id: '@tmielsch/rolling-compaction#ctxSurface/compactions',
+				service: 'ctxSurface',
+				namespace: 'ctxSurface',
+				method: 'compactions',
+				invocation: { kind: 'direct' },
+				parameters: [{
+					name: 'request',
+					wire: 'request',
+					source: 'json',
+					codec: {
+						mode: 'strict',
+						typeSymbol: '@tmielsch/rolling-compaction/ctx-surface#CtxSurfaceReadRequest',
+						create: () => _ctxSurface_read_request$schema,
+					},
+				}],
+				result: {
+					mode: 'strict',
+					typeSymbol: '@tmielsch/rolling-compaction/ctx-surface#CtxSurfaceCompactionsResult',
+					create: () => compactions_result$schema,
+				},
+				sourceLocation: { file: 'src/ctx-surface.ts', line: 245, column: 3 },
 			}],
 		}
 		//#endregion
@@ -108,6 +130,7 @@ ${viewBundleCode}
 			return module.exports;
 		})();
 		const CtxSurfaceView = ctxSurfaceViewModule.CtxSurfaceView;
+		const registerCompactChat = ctxSurfaceViewModule.registerCompactChat;
 		const CSS_TAG = ctxSurfaceViewModule.CSS_TAG;
 		const CTX_SURFACE_CSS = ctxSurfaceViewModule.CSS;
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(CSS_TAG) + "]") === null) {
@@ -132,11 +155,23 @@ ${viewBundleCode}
 						name: "conversation.view",
 						id: "ctx-surface",
 						order: 20,
-						label: () => "上下文",
+						label: () => "Model Context",
 						inject: () => ({
 							readSurface: (request) => sub.remote.ctxSurface.read(request),
 						}),
 					}, CtxSurfaceView));
+					// Compact Chat: second Chat tab with collapsible compaction blocks. Fails soft.
+					let disposeCompactChat = () => {};
+					try {
+						disposeCompactChat = registerCompactChat(
+							sub.slots,
+							(request) => sub.remote.ctxSurface.compactions(request),
+							(message) => { try { console.warn(message); } catch (_) {} },
+						);
+					} catch (error) {
+						try { console.warn("[rolling-compaction] Compact Chat disabled: " + (error && error.message ? error.message : error)); } catch (_) {}
+					}
+					return () => { disposeCompactChat(); };
 				},
 			});
 			return () => {};

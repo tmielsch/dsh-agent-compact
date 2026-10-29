@@ -1,0 +1,218 @@
+import * as React from 'react'
+import {
+  BLOCK_KIND,
+  compactState,
+  computeHiding,
+  isBlockKey,
+  planEntries,
+  planOrder,
+  tokensText,
+  visibleMembers,
+  type BlockNode,
+  type CompactionLite,
+  type Hiding,
+  type NodeLike,
+} from './compact-core.js'
+
+// DSH passes many, version dependent props to a conversation view. We name only the few
+// we touch and hand everything else straight to DSH's own Chat component (`ChatView`).
+type AnyProps = Record<string, any>
+
+const NO_COMPACTIONS: readonly CompactionLite[] = []
+const ABSENT = { getSnapshot: () => undefined, subscribe: () => () => {} }
+
+/** Wrap an object so methods stay bound to the original (private fields keep working). */
+function overlay<T extends object>(base: T, over: Record<string, unknown>): T {
+  return new Proxy(base, {
+    get(target, prop) {
+      if (typeof prop === 'string' && Object.prototype.hasOwnProperty.call(over, prop)) return over[prop]
+      const value = Reflect.get(target, prop, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
+
+interface Derived { readonly hiding: Hiding; readonly snapshot: any }
+
+/** Filtered Chat snapshot, memoised per (base snapshot, compactions, expand state). */
+const derivedCache = new WeakMap<object, { comps: readonly CompactionLite[]; expanded: ReadonlySet<string>; sessionId: string; value: Derived }>()
+function derive(snapshot: any, comps: readonly CompactionLite[], expanded: ReadonlySet<string>, sessionId: string): Derived {
+  const hit = derivedCache.get(snapshot)
+  if (hit && hit.comps === comps && hit.expanded === expanded && hit.sessionId === sessionId) return hit.value
+  const hiding = computeHiding(snapshot.order, (key) => snapshot.nodes.get(key) as NodeLike | undefined, comps, expanded, sessionId)
+  const order = planOrder(snapshot.order, hiding)
+  const blocks = hiding.blocks
+  const nodes = overlay(snapshot.nodes, {
+    get: (key: string) => (isBlockKey(key) ? blocks.get(key) : snapshot.nodes.get(key)),
+    source: (key: string) => (isBlockKey(key) ? { getSnapshot: () => blocks.get(key), subscribe: () => () => {} } : snapshot.nodes.source(key)),
+    processSource: (key: string) => (isBlockKey(key) ? ABSENT : snapshot.nodes.processSource(key)),
+    turnDataSource: (key: string) => (isBlockKey(key) ? ABSENT : snapshot.nodes.turnDataSource(key)),
+    values: () => [...snapshot.nodes.values(), ...blocks.values()],
+  })
+  const value: Derived = { hiding, snapshot: overlay(snapshot, { order, nodes }) }
+  derivedCache.set(snapshot, { comps, expanded, sessionId, value })
+  return value
+}
+
+const groupCache = new WeakMap<object, { hidden: ReadonlySet<string>; value: any }>()
+function filterGroup(group: any, hidden: ReadonlySet<string>): any {
+  if (!group || hidden.size === 0) return group
+  const hit = groupCache.get(group)
+  if (hit && hit.hidden === hidden) return hit.value
+  const members = visibleMembers(group.members, hidden)
+  const value = members === group.members ? group : { ...group, members }
+  groupCache.set(group, { hidden, value })
+  return value
+}
+
+const entriesCache = new WeakMap<object, { hiding: Hiding; value: any }>()
+
+function useCompactions(props: AnyProps): { compactions: readonly CompactionLite[]; error: string | null } {
+  const { sessionId, readCompactions } = props
+  const growth = props.useChat((s: any) => s.order.length)
+  const [state, setState] = React.useState<{ compactions: readonly CompactionLite[]; error: string | null }>({ compactions: NO_COMPACTIONS, error: null })
+  React.useEffect(() => {
+    if (!sessionId || typeof readCompactions !== 'function') return
+    let cancelled = false
+    const timer = setTimeout(() => {
+      readCompactions({ sessionId }).then((result: any) => {
+        if (cancelled) return
+        if (result && result.ok === true) {
+          const next: readonly CompactionLite[] = result.value.compactions
+          setState((prev) => (sameCompactions(prev.compactions, next) ? (prev.error === null ? prev : { compactions: prev.compactions, error: null }) : { compactions: next, error: null }))
+        } else setState({ compactions: NO_COMPACTIONS, error: (result && result.error && result.error.message) || 'read failed' })
+      }).catch((err: unknown) => {
+        if (!cancelled) setState({ compactions: NO_COMPACTIONS, error: err instanceof Error ? err.message : String(err) })
+      })
+    }, 250)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [sessionId, readCompactions, growth])
+  return state
+}
+
+function sameCompactions(a: readonly CompactionLite[], b: readonly CompactionLite[]): boolean {
+  return a.length === b.length && a.every((c, i) => c.compactionId === b[i].compactionId && c.checkpointSeq === b[i].checkpointSeq && c.summaryText === b[i].summaryText)
+}
+
+const barStyle: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 16px', fontSize: 12,
+  color: 'var(--dsw-alias-label-secondary)', borderBottom: '1px solid var(--dsw-alias-border-l1)',
+}
+const buttonStyle: React.CSSProperties = {
+  font: 'inherit', cursor: 'pointer', color: 'var(--dsw-alias-label-primary)',
+  background: 'var(--dsw-alias-interactive-bg-hover-solid)', border: 0, borderRadius: 6, padding: '3px 10px',
+}
+
+/**
+ * The Compact Chat tab: DSH's own Chat component over a filtered Chat snapshot.
+ * `ChatView` is the `component` of the registered `chat` view entry (see register.ts);
+ * nothing of DSH is copied.
+ */
+export function CompactChat(props: AnyProps): React.ReactElement {
+  const ChatView = props.ChatView as React.ComponentType<AnyProps>
+  const sessionId: string = props.sessionId
+  const { compactions, error } = useCompactions(props)
+  React.useSyncExternalStore(compactState.subscribe, compactState.version)
+  const expanded = compactState.expanded(sessionId)
+  const active = compactions.length > 0
+  const hidingRef = React.useRef<Hiding | null>(null)
+  if (!active) hidingRef.current = null
+
+  const useChat = React.useCallback((selector: (s: any) => any, equal?: any) => props.useChat((snapshot: any) => {
+    if (!active) return selector(snapshot)
+    const d = derive(snapshot, compactions, expanded, sessionId)
+    hidingRef.current = d.hiding
+    return selector(d.snapshot)
+  }, equal), [props.useChat, active, compactions, expanded, sessionId])
+
+  const useConversation = React.useCallback((selector: (s: any) => any, equal?: any) => props.useConversation((snapshot: any) => {
+    if (!active) return selector(snapshot)
+    const views = snapshot.views
+    const chat = views.get('chat')
+    const grouped = views.grouped('chat')
+    if (!chat || !grouped) return selector(snapshot)
+    const d = derive(chat, compactions, expanded, sessionId)
+    const hit = entriesCache.get(grouped.entries)
+    let entries: any
+    if (hit && hit.hiding === d.hiding) entries = hit.value
+    else {
+      entries = planEntries(grouped.entries, (key) => grouped.groupSource(key)?.getSnapshot?.()?.members, d.hiding)
+      entriesCache.set(grouped.entries, { hiding: d.hiding, value: entries })
+    }
+    return selector(overlay(snapshot, {
+      views: overlay(views, { grouped: (target: string) => (target === 'chat' ? overlay(grouped, { entries }) : views.grouped(target)) }),
+    }))
+  }, equal), [props.useConversation, active, compactions, expanded, sessionId])
+
+  const useChatNode = React.useCallback((key: any, selector: any, equal?: any) => {
+    const typed = typeof key === 'string'
+    const block = typed && isBlockKey(key)
+    const found = props.useChatNode(block ? '' : key, block ? () => undefined : selector, equal)
+    if (!block) return found
+    const node = hidingRef.current?.blocks.get(key) as BlockNode | undefined
+    return typeof selector === 'function' ? selector(node) : node
+  }, [props.useChatNode])
+
+  const useChatNodeProcess = React.useCallback((key: any, selector?: any, equal?: any) => {
+    const block = typeof key === 'string' && isBlockKey(key)
+    return props.useChatNodeProcess(block ? '' : key, selector, equal)
+  }, [props.useChatNodeProcess])
+
+  const useChatGroup = React.useCallback((key: any, selector: any, equal?: any) => props.useChatGroup(key, (group: any) => {
+    const hidden = hidingRef.current?.hidden
+    return selector(hidden ? filterGroup(group, hidden) : group)
+  }, equal), [props.useChatGroup, expanded, compactions])
+
+  const allIds = React.useMemo(() => compactions.map((c) => c.compactionId), [compactions])
+  const hiddenCount = active ? hidingRef.current?.hidden.size ?? 0 : 0
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 'auto', minHeight: 0, height: '100%' }}>
+      <div style={barStyle} data-compact-chat-bar="">
+        <strong style={{ color: 'var(--dsw-alias-label-primary)' }}>Compact Chat</strong>
+        <span>
+          {!active
+            ? (error ? `cannot read compactions: ${error}` : 'no compactions in this session')
+            : `${compactions.length} compaction${compactions.length === 1 ? '' : 's'}, ${hiddenCount} original row${hiddenCount === 1 ? '' : 's'} hidden`}
+        </span>
+        <span style={{ flex: 1 }} />
+        <button type="button" style={buttonStyle} disabled={!active} onClick={() => compactState.setAll(sessionId, allIds, true)}>Expand all</button>
+        <button type="button" style={buttonStyle} disabled={!active} onClick={() => compactState.setAll(sessionId, allIds, false)}>Collapse all</button>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 'auto', minHeight: 0, position: 'relative' }}>
+        <ChatView {...props} useChat={useChat} useConversation={useConversation} useChatNode={useChatNode} useChatNodeProcess={useChatNodeProcess} useChatGroup={useChatGroup} />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Chat row for one compaction block (registered as Chat node kind `compact-block`).
+ * Collapsed: header + checkpoint text. Expanded: header only; the originals show below it.
+ */
+export function CompactBlockView(props: AnyProps): React.ReactElement | null {
+  const node = props.node as BlockNode | undefined
+  React.useSyncExternalStore(compactState.subscribe, compactState.version)
+  if (!node || node.kind !== BLOCK_KIND) return null
+  const { sessionId, compactionId, summaryText, itemCount, tokens } = node.data
+  const open = compactState.expanded(sessionId).has(compactionId)
+  return (
+    <div data-compact-block={compactionId} data-compact-state={open ? 'expanded' : 'collapsed'}
+      style={{ border: '1px solid var(--dsw-alias-border-l2)', borderLeft: '3px solid var(--dsw-alias-state-warning-primary, #d9a400)', borderRadius: 8, margin: '4px 0' }}>
+      <button type="button" onClick={() => compactState.toggle(sessionId, compactionId)} aria-expanded={open}
+        style={{ ...buttonStyle, display: 'flex', width: '100%', alignItems: 'center', gap: 8, textAlign: 'left', background: 'transparent', padding: '8px 12px' }}>
+        <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+        <span>
+          {open
+            ? `Compaction: showing the ${itemCount} original items (~${tokensText(tokens)} tokens) below. Click to show the checkpoint instead.`
+            : `Compacted ${itemCount} history items (~${tokensText(tokens)} tokens). This checkpoint is what the model sees. Click to show the originals.`}
+        </span>
+      </button>
+      {open ? null : (
+        <pre style={{ margin: 0, padding: '4px 14px 12px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 360, overflow: 'auto', font: 'inherit', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }}>
+          {summaryText || '(no checkpoint text in the log)'}
+        </pre>
+      )}
+    </div>
+  )
+}
