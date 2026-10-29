@@ -1,7 +1,8 @@
 // Compact Chat: registration against DSH's slot ledger (no React here).
 //
 // Two things are registered:
-//  1. a Chat node kind `compact-block` (supported API: slot `conversation.chat.node`, keyed);
+//  1. two Chat node kinds `compact-block` (checkpoint / start bar) and `compact-end` (end bar)
+//     (supported API: slot `conversation.chat.node`, keyed);
 //  2. a second conversation view `compact-chat` that renders DSH's OWN Chat component
 //     (taken from the registered `chat` view entry) over a filtered snapshot.
 //
@@ -10,7 +11,7 @@
 // anything throws, no tab is added and the normal Chat is never touched.
 
 import { CompactBlockView, CompactChatRoot } from './CompactChat.js'
-import { BLOCK_KIND } from './compact-core.js'
+import { BLOCK_KIND, END_KIND } from './compact-core.js'
 
 const TAB_ID = 'compact-chat'
 const CHAT_ID = 'chat'
@@ -35,7 +36,11 @@ export function registerCompactChat(slots: SlotsLike, readCompactions: (request:
   let mine: any = null
 
   // 1. the block row (deferred by the slot machinery until `conversation.chat.node` exists)
-  slots.inject('conversation.chat.node', () => slots.register({ name: 'conversation.chat.node', key: BLOCK_KIND }, CompactBlockView))
+  // `locale: 'chat'` gives the row DSH's own `t`, so the Markdown chrome (copy buttons of
+  // code blocks) uses the same words as every other chat message.
+  for (const key of [BLOCK_KIND, END_KIND]) {
+    slots.inject('conversation.chat.node', () => slots.register({ name: 'conversation.chat.node', key, locale: 'chat' }, CompactBlockView))
+  }
 
   // 2. the tab, once the Chat entry exists
   const tryRegister = (): void => {

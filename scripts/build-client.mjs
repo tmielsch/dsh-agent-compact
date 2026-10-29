@@ -53,7 +53,7 @@ const viewBuild = esbuild.buildSync({
 	platform: 'browser',
 	target: 'es2020',
 	jsx: 'automatic',
-	external: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
+	external: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', '@deepseek-ai/dsh-client-ui-primitives'],
 	logLevel: 'silent',
 })
 if (viewBuild.errors.length > 0) throw new Error('esbuild failed:\n' + viewBuild.errors.map((e) => e.text).join('\n'))

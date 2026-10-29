@@ -1,6 +1,7 @@
 import * as React from 'react'
 import {
   BLOCK_KIND,
+  END_KIND,
   compactState,
   computeHiding,
   isBlockKey,
@@ -184,33 +185,89 @@ export function CompactChat(props: AnyProps): React.ReactElement {
   )
 }
 
+// DSH's Markdown renderer lives in a package the client module loader hands to plugins
+// through the factory's `require` (the esbuild bundle keeps this one call external, see
+// scripts/build-client.mjs). It is fetched when a row first renders, NOT at load time, so a
+// miss can never take the whole plugin (and the old "Model Context" tab) down with it.
+declare const require: (id: string) => any
+type MarkdownComponent = React.ComponentType<{ text: string; labels?: unknown }>
+function loadMarkdownText(): MarkdownComponent | null {
+  try {
+    const found = require('@deepseek-ai/dsh-client-ui-primitives')?.MarkdownText
+    return typeof found === 'function' || typeof found === 'object' ? (found as MarkdownComponent) : null
+  } catch (error) {
+    console.warn('[rolling-compaction] DSH MarkdownText not available, showing plain text:', error)
+    return null
+  }
+}
+
+const FALLBACK_LABELS = {
+  code: { copyLabel: 'Copy', copiedLabel: 'Copied', toolbarLabels: { codeLabel: 'Code', wrapLabel: 'Wrap', unwrapLabel: 'Unwrap' } },
+  footnotes: 'Footnotes',
+}
+
+/** Markdown chrome labels: DSH's own words when the row has the chat locale seat `t`, else English. */
+function markdownLabels(t: unknown): unknown {
+  if (typeof t !== 'function') return FALLBACK_LABELS
+  const tr = t as (key: string) => string
+  return {
+    code: { copyLabel: tr('copy'), copiedLabel: tr('copied'), toolbarLabels: { codeLabel: tr('codeBlock.title'), wrapLabel: tr('codeBlock.wrap'), unwrapLabel: tr('codeBlock.unwrap') } },
+    footnotes: tr('markdown.footnotes'),
+  }
+}
+
+const metaStyle: React.CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', margin: '0 0 4px' }
+const linkButtonStyle: React.CSSProperties = {
+  font: 'inherit', fontSize: 12, cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)',
+  background: 'var(--dsw-alias-interactive-bg-hover-solid)', border: 0, borderRadius: 6, padding: '3px 10px',
+}
+const barRowStyle: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 10, margin: '6px 0', padding: '4px 10px',
+  borderLeft: '3px solid var(--dsw-alias-state-warning-primary, #d9a400)', background: 'var(--dsw-alias-bg-layer-1, transparent)',
+  fontSize: 12, color: 'var(--dsw-alias-label-secondary)',
+}
+
 /**
- * Chat row for one compaction block (registered as Chat node kind `compact-block`).
- * Collapsed: header + checkpoint text. Expanded: header only; the originals show below it.
+ * Chat row for one compaction (Chat node kinds `compact-block` and `compact-end`).
+ *  - collapsed: the checkpoint rendered like an ordinary chat message (DSH's MarkdownText),
+ *    then a button "Expand original context";
+ *  - expanded: a thin bar at the start of the originals and another at their end, each
+ *    with "Collapse to checkpoint", so the way back is always close.
+ * The toggle is display only; the model's context is never touched.
  */
 export function CompactBlockView(props: AnyProps): React.ReactElement | null {
   const node = props.node as BlockNode | undefined
   React.useSyncExternalStore(compactState.subscribe, compactState.version)
-  if (!node || node.kind !== BLOCK_KIND) return null
+  // Hooks first, before any early return: the row switches between states on a click.
+  const labels = React.useMemo(() => markdownLabels(props.t), [props.t])
+  const Markdown = React.useMemo(loadMarkdownText, [])
+  if (!node || (node.kind !== BLOCK_KIND && node.kind !== END_KIND)) return null
   const { sessionId, compactionId, summaryText, itemCount, tokens } = node.data
   const open = compactState.expanded(sessionId).has(compactionId)
+  const amount = `${itemCount} items (~${tokensText(tokens)} tokens)`
+  const collapse = () => compactState.toggle(sessionId, compactionId)
+
+  if (open || node.kind === END_KIND) {
+    const end = node.kind === END_KIND
+    return (
+      <div data-compact-block={compactionId} data-compact-state="expanded" data-compact-bar={end ? 'end' : 'start'} style={barRowStyle}>
+        <span style={{ flex: 1 }}>{end ? `End of original context (${amount})` : `Original context: ${amount}`}</span>
+        <button type="button" style={linkButtonStyle} onClick={collapse}>Collapse to checkpoint</button>
+      </div>
+    )
+  }
+
   return (
-    <div data-compact-block={compactionId} data-compact-state={open ? 'expanded' : 'collapsed'}
-      style={{ border: '1px solid var(--dsw-alias-border-l2)', borderLeft: '3px solid var(--dsw-alias-state-warning-primary, #d9a400)', borderRadius: 8, margin: '4px 0' }}>
-      <button type="button" onClick={() => compactState.toggle(sessionId, compactionId)} aria-expanded={open}
-        style={{ ...buttonStyle, display: 'flex', width: '100%', alignItems: 'center', gap: 8, textAlign: 'left', background: 'transparent', padding: '8px 12px' }}>
-        <span aria-hidden="true">{open ? '▾' : '▸'}</span>
-        <span>
-          {open
-            ? `Compaction: showing the ${itemCount} original items (~${tokensText(tokens)} tokens) below. Click to show the checkpoint instead.`
-            : `Compacted ${itemCount} history items (~${tokensText(tokens)} tokens). This checkpoint is what the model sees. Click to show the originals.`}
-        </span>
-      </button>
-      {open ? null : (
-        <pre style={{ margin: 0, padding: '4px 14px 12px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 360, overflow: 'auto', font: 'inherit', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }}>
-          {summaryText || '(no checkpoint text in the log)'}
-        </pre>
-      )}
+    <div data-compact-block={compactionId} data-compact-state="collapsed" style={{ margin: '10px 0' }}>
+      <div style={metaStyle}>Context compacted: {amount}. This checkpoint is what the model reads instead of the originals.</div>
+      {!summaryText
+        ? <div style={{ color: 'var(--dsw-alias-label-secondary)' }}>(no checkpoint text in the log)</div>
+        : Markdown
+          ? <Markdown text={summaryText} labels={labels} />
+          : <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{summaryText}</div>}
+      <div style={{ marginTop: 6 }}>
+        <button type="button" style={linkButtonStyle} onClick={collapse} aria-expanded={false}>Expand original context</button>
+      </div>
     </div>
   )
 }

@@ -11,7 +11,7 @@ const built = esbuild.buildSync({
   bundle: true, write: false, format: 'esm', platform: 'node', target: 'es2022', logLevel: 'silent',
 })
 const core = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'))
-const { computeHiding, planOrder, planEntries, visibleMembers, blockKey, isBlockKey, compactState, overlay } = core
+const { computeHiding, planOrder, planEntries, visibleMembers, blockKey, endKey, isBlockKey, compactState, overlay } = core
 
 // Rows of a small chat. anchorSeq values are log seqs. Compaction c1 replaced seqs 10..30.
 const nodes = new Map([
@@ -34,10 +34,20 @@ test('collapsed: originals of the span are hidden, turn rows stay, one block is 
   assert.equal(h.blocks.get(blockKey('c1')).data.itemCount, 3)
 })
 
-test('expanded: nothing hidden, block header sits above the first original', () => {
+test('expanded: nothing hidden, start bar above the first original, end bar below the last', () => {
   const h = computeHiding(order, nodeOf, [c1], new Set(['c1']), 's')
   assert.equal(h.hidden.size, 0)
-  assert.deepEqual(planOrder(order, h), ['u1', blockKey('c1'), 'u2', 'p2', 'a2', 't2', 'u3'])
+  assert.equal(h.lastKey.get('c1'), 't2')
+  assert.deepEqual(planOrder(order, h), ['u1', blockKey('c1'), 'u2', 'p2', 'a2', 't2', endKey('c1'), 'u3'])
+  assert.equal(h.blocks.get(blockKey('c1')).data.open, true)
+  assert.equal(h.blocks.get(endKey('c1')).data.role, 'end')
+})
+
+test('collapsed has no end bar and the block carries open=false', () => {
+  const h = computeHiding(order, nodeOf, [c1], new Set(), 's')
+  assert.equal(h.blocks.has(endKey('c1')), false)
+  assert.equal(h.blocks.get(blockKey('c1')).data.open, false)
+  assert.equal(h.blocks.get(blockKey('c1')).data.role, 'block')
 })
 
 test('a compaction with no loaded row gets no block (nothing to replace on screen)', () => {
@@ -66,6 +76,26 @@ test('grouped entries: hidden nodes removed, fully hidden group dropped, block b
   assert.deepEqual(out.map((e) => e.key), ['u1', blockKey('c1'), 'g-mixed', 'u3'])
   assert.deepEqual(visibleMembers(groups['g-mixed'], h.hidden).map((m) => m.key), ['u3'])
   assert.equal(visibleMembers(groups['g-mixed'], new Set()), groups['g-mixed'])
+})
+
+test('grouped entries, expanded: start bar before the first original, end bar after the last', () => {
+  const entries = [
+    { kind: 'node', key: 'u1' },
+    { kind: 'node', key: 'u2' },
+    { kind: 'group', key: 'g-hidden' },
+    { kind: 'group', key: 'g-mixed' },
+    { kind: 'node', key: 'u3' },
+  ]
+  const groups = { 'g-hidden': [{ key: 'a2' }, { key: 't2' }], 'g-mixed': [{ key: 't2' }, { key: 'u3' }] }
+  const h = computeHiding(order, nodeOf, [c1], new Set(['c1']), 's')
+  const out = planEntries(entries, (k) => groups[k], h)
+  // last original row is t2, which sits in group g-hidden: the end bar follows that group.
+  assert.deepEqual(out.map((e) => e.key), ['u1', blockKey('c1'), 'u2', 'g-hidden', endKey('c1'), 'g-mixed', 'u3'])
+})
+
+test('both bar kinds are block keys; ordinary compaction rows are not', () => {
+  assert.equal(isBlockKey(endKey('x')), true)
+  assert.equal(isBlockKey('9:compaction' + 'x'), false)
 })
 
 test('block keys are recognised and state toggles notify', () => {
