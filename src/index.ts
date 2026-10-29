@@ -14,7 +14,7 @@ import { createShadowUserMessage } from './shadow-message.js'
 import { effectiveCut, patchEngine, planTrunk, runTrunkCompaction } from './optimizer.js'
 import { normText } from './normalize.js'
 import { CtxSurfaceService } from './ctx-surface.js'
-import { resolveBoundaries, soleToolCall, spanText } from './boundary.js'
+import { prefixHits, resolveBoundaries, soleToolCall, spanText } from './boundary.js'
 import { markerTag } from './anchor.js'
 import { nodeFlatText } from './surface-text.js'
 import { ForkRegistry, SharedTrunkMemo } from './memo.js'
@@ -362,12 +362,21 @@ export function apply(ctx: Context, config: Config) {
     // Synchron und ohne sessionQuery: die Oberflaeche kommt aus der Sitzung
     // selbst (session.surface.nodes + eventAt), so wie es der Trunk-Schutz
     // auch macht. Der Kontext-Provider muss synchron sein.
+    //
+    // Fork (2026-10-29): das Fenster ist 24 Meldungen statt 8. Der Grund ist
+    // gemeldet: ein Span, der weiter zurueckliegt, hat in der Liste keinen
+    // Marker fuer seinen Anfang — das Modell muss Worte zitieren, und die
+    // Anfaenge der Harness-Meldungen sind vorgeschrieben, also trifft der
+    // Zitat-Anker mehrere Knoten (AMBIGUOUS). Die Liste erscheint nur, wenn
+    // der Nudge feuert (alle volumeNudgeTokens Wachstum), 24 Zeilen kosten
+    // dafuer rund 400 Token — gegen 50k Wachstum billig.
+    const MARKER_WINDOW = 24
     const markerLines = (session: SessionLike): string => {
       try {
         const evs = surfaceEvents(session as never)
         if (!evs.length) return ''
         const eligible: { seq: number; type: string }[] = []
-        for (let i = evs.length - 1; i >= 0 && eligible.length < 8; i--) {
+        for (let i = evs.length - 1; i >= 0 && eligible.length < MARKER_WINDOW; i--) {
           const e = evs[i] as { seq?: unknown; type?: unknown }
           if (e.type !== 'user/message' && e.type !== 'assistant/message') continue
           eligible.unshift({ seq: e.seq as number, type: e.type as string })
@@ -420,7 +429,7 @@ export function apply(ctx: Context, config: Config) {
     const kept = stash.list(sid)
     const head = 'summary is REQUIRED for a fresh compaction: write the Markdown checkpoint yourself (this tool makes no LLM summarizer call)'
     if (!config.keepFailedSummary || !kept.length) return head
-    return head + '\nto reuse the kept text of a previous failure unchanged, retry the same span without summary' + (keptLabel(kept[0]) ? ' (the newest kept text belongs to ' + keptLabel(kept[0]) + ')' : '')
+    return head + '\nto reuse the kept text of a previous failure unchanged, retry the same span without summary — after an AMBIGUOUS anchor, the neighbour-anchored retry the hint recommends (the span one node shorter) reuses it too' + (keptLabel(kept[0]) ? ' (the newest kept text belongs to ' + keptLabel(kept[0]) + ')' : '')
   }
 
   disposers.push(tools.register(defineTool({
@@ -430,7 +439,7 @@ export function apply(ctx: Context, config: Config) {
       scope: { type: 'string', enum: ['span', 'trunk'], description: 'Optional. "span" (default) compacts the span between the anchors with your summary. "trunk" compacts the whole history this forked session shares with its siblings or forks into the shared checkpoint; startAnchor, endAnchor and summary are ignored.' },
       startAnchor: { type: 'string', description: 'Verbatim opening of the span\'s first message — or, PREFERRED, a marker id like `[a7730ed]` from the reminder\'s anchor-marker list: it names exactly one message and never fails. Otherwise see "Choosing anchors" in the description. Omit it only to rebaseline from the beginning; the span then starts after the system prompt.' },
       endAnchor: { type: 'string', description: 'Verbatim opening of the span\'s last message, or PREFERRED a marker id like `[a7730ed]` from the reminder\'s anchor-marker list. Required for scope "span". This node is replaced — pass its predecessor\'s marker to keep it.' },
-      summary: { type: 'string', description: 'Required for scope "span" on a fresh compaction. The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; must be smaller than the compressed content, but keep every detail a later similar task could need. After a failed compaction you may OMIT it to reuse the kept text of that failure unchanged (retried only for the same span); pass a new one to rewrite it.' },
+      summary: { type: 'string', description: 'Required for scope "span" on a fresh compaction. The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; must be smaller than the compressed content, but keep every detail a later similar task could need. After a failed compaction you may OMIT it to reuse the kept text of that failure unchanged (retried for the same span, or for the neighbour-anchored retry the AMBIGUOUS hint recommends); pass a new one to rewrite it.' },
     },
     output: {
       // 显式声明真实字段（而非开放的 additionalProperties:true 空对象），
@@ -562,9 +571,25 @@ export function apply(ctx: Context, config: Config) {
             }
           } else {
             const hit = stash.takeMatched(sid, { startAnchor: rawStartAnchor, endAnchor: rawEndAnchor, startSeq, endSeq })
-            if (!hit) throw new Error(summaryRequiredError(sid))
-            keptEntry = hit
-            summaryText = hit.text
+            if (hit) {
+              keptEntry = hit
+              summaryText = hit.text
+            } else {
+              // Regel 4 (./summary-stash.ts): der Wiederversuch, den die
+              // AMBIGUOUS-Meldung empfiehlt — der Anker sitzt jetzt auf dem
+              // Vorgaenger des Kandidaten, also endet die Spanne einen Knoten
+              // kuerzer. Der Text des Fehlschlags gehoert zu genau diesem
+              // Versuch und wird unverändert wiederbenutzt.
+              const nextSeq = ei + 1 < nodes.length ? nodes[ei + 1].seq : null
+              const resolve = (anchor: string): number[] => {
+                const h = prefixHits(nodes, anchor)
+                return h.map((i) => nodes[i].seq)
+              }
+              const nb = stash.takeNeighbourMatched(sid, { startAnchor: rawStartAnchor, endAnchor: rawEndAnchor, startSeq, endSeq }, nextSeq, resolve)
+              if (!nb) throw new Error(summaryRequiredError(sid))
+              keptEntry = nb
+              summaryText = nb.text
+            }
           }
         }
         // Shared trunk lock: a default-scope span must start after the protected prefix.

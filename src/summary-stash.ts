@@ -69,6 +69,43 @@ export function matchKept(entries: readonly KeptSummary[], span: AttemptSpan): K
   return null
 }
 
+/**
+ * Regel 4 (gemeldet 2026-10-29): der Wiederversuch, den die AMBIGUOUS-Meldung
+ * selbst empfiehlt — „anchor a neighbouring message, to keep one of them". Der
+ * Fehlschlag schrieb den Text für eine Spanne, deren Ende auf einem der
+ * Kandidaten sass; der Wiederversuch endet jetzt auf dessen Vorgänger, also
+ * genau einen Knoten kürzer. Das ist dieselbe Verdichtung, und der Text soll
+ * unverändert wiederbenutzt werden — die bisherigen drei Regeln erkennen ihn
+ * nicht, weil der Anker ein anderer ist.
+ *
+ * Die Regel braucht die Oberfläche, deshalb als Rückgabe-Funktion: `resolve`
+ * nennt die seqs, die ein Anker jetzt trifft (leer, wenn er nichts trifft),
+ * `nextSeq` ist der Knoten direkt nach dem Ende dieses Versuchs. Ein Anker,
+ * der mehrere Knoten trifft, ist mehrdeutig, und genau das ist der gemeldete
+ * Fall: die Fertig-Meldungen desselben Unteragenten sind wortgleich, der
+ * gehaltene endAnchor löst also auf zwei Knoten auf, und einer von ihnen ist
+ * der Knoten direkt nach dem neuen Ende.
+ *
+ * Ein Eintrag, der nie eine Spanne aufgelöst hat, gehört zu diesem Versuch,
+ * wenn sein endAnchor den Knoten direkt nach dem neuen Ende unter seinen
+ * Kandidaten hat und die Startseite dieselbe Anker-Angabe trägt.
+ */
+export function matchNeighbourKept(
+  entries: readonly KeptSummary[],
+  span: AttemptSpan,
+  nextSeq: number | null,
+  resolve: (anchor: string) => number[],
+): KeptSummary | null {
+  if (nextSeq === null || span.endSeq === undefined) return null
+  for (const e of entries) {
+    if (e.startSeq !== undefined || e.endAnchor === undefined) continue
+    if (!resolve(e.endAnchor).includes(nextSeq)) continue
+    if (e.startAnchor !== undefined && span.startAnchor !== undefined && normText(e.startAnchor) !== normText(span.startAnchor)) continue
+    return e
+  }
+  return null
+}
+
 /** Per-session ring of the kept checkpoint texts (see KEEP). */
 export class SummaryStash {
   private readonly bySession = new Map<string, KeptSummary[]>()
@@ -100,6 +137,17 @@ export class SummaryStash {
     const list = this.bySession.get(sid)
     if (!list || !list.length) return null
     const hit = matchKept(list, span)
+    if (!hit) return null
+    const i = list.indexOf(hit)
+    if (i >= 0) list.splice(i, 1)
+    return hit
+  }
+
+  /** The kept entry this attempt may reuse by the neighbour rule (see matchNeighbourKept), removed from the stash. */
+  takeNeighbourMatched(sid: string, span: AttemptSpan, nextSeq: number | null, resolve: (anchor: string) => number[]): KeptSummary | null {
+    const list = this.bySession.get(sid)
+    if (!list || !list.length) return null
+    const hit = matchNeighbourKept(list, span, nextSeq, resolve)
     if (!hit) return null
     const i = list.indexOf(hit)
     if (i >= 0) list.splice(i, 1)
