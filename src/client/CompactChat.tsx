@@ -8,6 +8,8 @@ import {
   overlay,
   planEntries,
   planOrder,
+  rechnungText,
+  secondsText,
   tokensText,
   visibleMembers,
   type BlockNode,
@@ -90,7 +92,12 @@ function useCompactions(props: AnyProps): { compactions: readonly CompactionLite
 }
 
 function sameCompactions(a: readonly CompactionLite[], b: readonly CompactionLite[]): boolean {
-  return a.length === b.length && a.every((c, i) => c.compactionId === b[i].compactionId && c.checkpointSeq === b[i].checkpointSeq && c.summaryText === b[i].summaryText)
+  return a.length === b.length && a.every((c, i) => {
+    const d = b[i]
+    return c.compactionId === d.compactionId && c.checkpointSeq === d.checkpointSeq && c.summaryText === d.summaryText
+      && c.checkpointChars === d.checkpointChars && c.checkpointTokensEstimate === d.checkpointTokensEstimate
+      && c.writeDurationSeconds === d.writeDurationSeconds
+  })
 }
 
 // DSH scrolls the whole conversation area as ONE page ([data-conversation-scroll] makes the
@@ -245,6 +252,12 @@ function markdownLabels(t: unknown): unknown {
 }
 
 const metaStyle: React.CSSProperties = { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', margin: '0 0 4px' }
+/** The arithmetic line: the block's own meta style, with the warning colour of the bars for a case that barely paid off. */
+const rechnungStyle = (poor: boolean): React.CSSProperties => ({
+  ...metaStyle,
+  margin: '4px 0 6px',
+  color: poor ? 'var(--dsw-alias-state-warning-primary, #d9a400)' : 'var(--dsw-alias-label-secondary)',
+})
 const linkButtonStyle: React.CSSProperties = {
   font: 'inherit', fontSize: 12, cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)',
   background: 'var(--dsw-alias-interactive-bg-hover-solid)', border: 0, borderRadius: 6, padding: '3px 10px',
@@ -291,6 +304,9 @@ export function CompactBlockView(props: AnyProps): React.ReactElement | null {
       <div style={metaStyle}>
         Context compacted: {amount}. This checkpoint is what the model reads instead of the originals.
         {rowsLoaded === 0 ? ' The original messages are not shown in this chat (not loaded, or not a kind the chat draws).' : ''}
+      </div>
+      <div data-compact-rechnung={compactionId} style={rechnungStyle(node.data.poorPayoff)}>
+        {rechnungText(node.data)}
       </div>
       {!summaryText
         ? <div style={{ color: 'var(--dsw-alias-label-secondary)' }}>(no checkpoint text in the log)</div>

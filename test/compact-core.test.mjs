@@ -11,7 +11,7 @@ const built = esbuild.buildSync({
   bundle: true, write: false, format: 'esm', platform: 'node', target: 'es2022', logLevel: 'silent',
 })
 const core = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'))
-const { coverageOf, computeHiding, planOrder, planEntries, visibleMembers, blockKey, endKey, isBlockKey, compactState, overlay } = core
+const { coverageOf, computeHiding, planOrder, planEntries, visibleMembers, blockKey, endKey, isBlockKey, compactState, overlay, rechnungText, secondsText, tokensText } = core
 
 // Rows of a small chat. anchorSeq values are log seqs. Compaction c1 replaced seqs 10..30.
 const nodes = new Map([
@@ -258,5 +258,78 @@ test('a turn header whose whole work log is hidden is hidden too; a partly visib
   assert.deepEqual([...some.hidden].sort(), ['t1'], 'one log row still visible: the header stays')
   const open = computeHiding(keys, (k) => chat.get(k), [all], new Set(['k']), 's')
   assert.equal(open.hidden.size, 0, 'expanded: nothing hidden')
+})
+
+// Die Rechnung des Blocks: Freigegebene Token, Größe des Checkpoints, Schreibdauer,
+// Nettogewinn. Der Fixture ist eine konstruierte Verdichtung mit allen drei Zahlen.
+const cRechnung = {
+  ...c1,
+  checkpointChars: 6270,
+  checkpointTokensEstimate: 1000,
+  writeDurationSeconds: 105.27,
+}
+
+test('the block carries the arithmetic: freed tokens, checkpoint size, duration, net gain', () => {
+  const h = computeHiding(order, nodeOf, [cRechnung], new Set(), 's')
+  const d = h.blocks.get(blockKey('c1')).data
+  assert.equal(d.freedTokens, 900, 'Freigegebene Token = shadowedTokenCount')
+  assert.equal(d.checkpointTokens, 1000, 'Größe des Checkpoints')
+  assert.equal(d.checkpointChars, 6270, 'Zeichen der Checkpoint-Nachricht')
+  assert.equal(d.writeSeconds, 105.27, 'Schreibdauer in Sekunden')
+  assert.equal(d.netGainTokens, -100, 'Nettogewinn = freigegeben minus Checkpoint')
+  assert.equal(d.poorPayoff, true, 'Checkpoint größer als ein Fünftel der freigegebenen Token')
+})
+
+test('a compaction without the arithmetic fields leaves the numbers null and is not marked poor', () => {
+  const h = computeHiding(order, nodeOf, [c1], new Set(), 's')
+  const d = h.blocks.get(blockKey('c1')).data
+  assert.equal(d.checkpointTokens, null)
+  assert.equal(d.writeSeconds, null)
+  assert.equal(d.netGainTokens, null)
+  assert.equal(d.poorPayoff, false)
+  assert.equal(d.freedTokens, 900, 'the freed count is always there')
+})
+
+// The threshold is the Checkpoint against a fifth of the replaced span, not the net
+// gain against a fifth of the freed tokens (the two differ; measured on the real log
+// of this machine, the net-gain reading marks none of the 10 compactions).
+test('poorPayoff compares the checkpoint to a fifth of the freed tokens, not the net gain', () => {
+  const edge = { ...cRechnung, shadowedTokenCount: 1000, checkpointTokensEstimate: 250, checkpointChars: 1568 }
+  const d = computeHiding(order, nodeOf, [edge], new Set(), 's').blocks.get(blockKey('c1')).data
+  assert.equal(d.netGainTokens, 750)
+  assert.equal(d.netGainTokens < 1000 / 5, false, 'the net gain is not below a fifth')
+  assert.equal(d.poorPayoff, true, 'the checkpoint is above a fifth of the freed tokens')
+  const ok = { ...cRechnung, shadowedTokenCount: 1000, checkpointTokensEstimate: 190, checkpointChars: 1191 }
+  assert.equal(computeHiding(order, nodeOf, [ok], new Set(), 's').blocks.get(blockKey('c1')).data.poorPayoff, false)
+})
+
+test('the arithmetic line names all four numbers in German and the size as estimated from characters', () => {
+  const line = rechnungText({
+    freedTokens: 81029, checkpointTokens: 1417, checkpointChars: 8883,
+    writeSeconds: 99.6, netGainTokens: 79612, poorPayoff: false,
+  })
+  assert.equal(line, 'Freigegebene Token: 81k · Größe des Checkpoints: ≈1.4k Token (aus 8883 Zeichen gerechnet) · Schreibdauer: 99,6 s · Nettogewinn: 79.6k Token')
+})
+
+test('the arithmetic line marks a case that barely paid off, and drops numbers the log does not carry', () => {
+  const poor = rechnungText({
+    freedTokens: 4553, checkpointTokens: 924, checkpointChars: 5794,
+    writeSeconds: 32.3, netGainTokens: 3629, poorPayoff: true,
+  })
+  assert.ok(poor.includes('Nettogewinn: 3.6k Token'))
+  assert.ok(poor.includes('kaum gelohnt — der Checkpoint ist größer als ein Fünftel des ersetzten Abschnitts'))
+  const bare = rechnungText({
+    freedTokens: 120, checkpointTokens: null, checkpointChars: null,
+    writeSeconds: null, netGainTokens: null, poorPayoff: false,
+  })
+  assert.equal(bare, 'Freigegebene Token: 120')
+})
+
+test('secondsText writes the German comma and keeps a zero duration as a number', () => {
+  assert.equal(secondsText(0.0), '0,0 s')
+  assert.equal(secondsText(0.1), '0,1 s')
+  assert.equal(secondsText(122.88), '122,9 s')
+  assert.equal(secondsText(null), '')
+  assert.equal(tokensText(16531), '16.5k')
 })
 

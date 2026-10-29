@@ -8,12 +8,13 @@ import { readCompactions } from '../lib/compactions.js'
 function log({ withCheckpoint = true, withSummary = true } = {}) {
   const events = [
     { type: 'user/message', seq: 10, data: { source: { kind: 'user' } } },
-    { type: 'compaction/start', seq: 20, data: { compactionId: 'c1', turn: 1 } },
+    { type: 'compaction/start', seq: 20, time: 1000, data: { compactionId: 'c1', turn: 1 } },
   ]
   if (withSummary) {
     events.push({
       type: 'compaction/summary',
       seq: 21,
+      time: 106270,
       data: {
         compactionId: 'c1',
         summary: [{ type: 'text', text: '## Checkpoint\n- kept' }, { type: 'image', text: 'ignored' }],
@@ -28,7 +29,10 @@ function log({ withCheckpoint = true, withSummary = true } = {}) {
       type: 'user/message',
       seq: 22,
       surfaceOp: { op: 'replace', startSeq: 3, endSeq: 9 },
-      data: { source: { kind: 'compact-checkpoint', compactionId: 'c1' } },
+      data: {
+        source: { kind: 'compact-checkpoint', compactionId: 'c1' },
+        content: [{ type: 'text', text: 'A'.repeat(6270) }, { type: 'image', text: 'ignored' }],
+      },
     })
   }
   events.push({ type: 'compaction/end', seq: 23, data: { compactionId: 'c1', turn: 1 } })
@@ -62,4 +66,33 @@ test('orders compactions by checkpoint position and ignores junk', () => {
   ]
   const out = readCompactions([null, 7, { type: 'x' }, ...second, ...log()])
   assert.deepEqual(out.map((c) => c.compactionId), ['c1', 'c2'])
+})
+
+// Nummer 2 — Größe des Checkpoints: die Zeichen der Checkpoint-Nachricht selbst,
+// geteilt durch 6,27 (gemessener Wert aus `ZEICHEN_PRO_TOKEN`).
+test('counts the checkpoint message text characters and estimates its size in tokens', () => {
+  const [c] = readCompactions(log())
+  assert.equal(c.checkpointChars, 6270)
+  assert.equal(c.checkpointTokensEstimate, 1000)
+})
+
+// Nummer 3 — Schreibdauer: compaction/start.time bis compaction/summary.time,
+// gepaart über dieselbe compactionId.
+test('measures the writing duration from start to summary of the same compactionId', () => {
+  const [c] = readCompactions(log())
+  assert.equal(c.writeDurationSeconds, 105.27)
+})
+
+test('reports no duration when the log has no start time, and zero when it is a non-LLM path', () => {
+  const noStart = log().filter((e) => e.type !== 'compaction/start')
+  assert.equal(readCompactions(noStart)[0].writeDurationSeconds, null)
+  const instant = log().map((e) => (e.type === 'compaction/summary' ? { ...e, time: 1000 } : e))
+  assert.equal(readCompactions(instant)[0].writeDurationSeconds, 0)
+})
+
+test('a checkpoint message without text gives zero characters and zero tokens', () => {
+  const bare = log().map((e) => (e.type === 'user/message' && e.seq === 22 ? { ...e, data: { ...e.data, content: [] } } : e))
+  const [c] = readCompactions(bare)
+  assert.equal(c.checkpointChars, 0)
+  assert.equal(c.checkpointTokensEstimate, 0)
 })

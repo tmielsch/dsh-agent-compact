@@ -49,6 +49,11 @@ export const compaction$schema = z.object({
   shadowedSeqs: z.array(z.number()).readonly(),
   shadowedTokenCount: z.number().readonly(),
   summaryText: z.string().readonly(),
+  // The compaction's arithmetic. Optional: the host process is not hot-reloaded while
+  // the client bundle is, so there is an update window between the two ends.
+  checkpointChars: z.number().readonly().optional(),
+  checkpointTokensEstimate: z.number().readonly().optional(),
+  writeDurationSeconds: z.union([z.number(), z.null()]).readonly().optional(),
 })
 
 export const compactions_result$schema = z.object({
