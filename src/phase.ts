@@ -42,6 +42,24 @@ export function nudgeMode(grownTokens: number, thresholdTokens: number, occupanc
   return phaseComplete(todos) ? 'phase' : null
 }
 
+/**
+ * Der Zwischenfazit-Block als Teil des Checkpoints (Anordnung des Menschen vom
+ * 30.10.2026): Der Checkpoint ist der scrollbare Block im Chat, nicht ein
+ * verborgenes Artefakt. Er beginnt mit einer Überschrift, die der Mensch beim
+ * Durchscrollen sofort erkennt, und steht am Ende des Zugs.
+ */
+export function zwischenfazitText(): string {
+  return (
+    'The checkpoint is the human\'s scrollable marker, not a hidden artifact: it opens with a ' +
+    'real Markdown H1 heading `# 📌 ZWISCHENFAZIT — <three words naming what this phase was about>`, ' +
+    'then the sections below. Never a code block (a code block renders monospace and does not stand out ' +
+    'while scrolling), never a heading smaller than H1, and the word ZWISCHENFAZIT always spelled ' +
+    'identically so the human can search for it. The heading carries the theme, so the block is readable ' +
+    'without opening it. Under it, the first lines are the standing, the decision, and the handgrips that ' +
+    'come next in the order the human performs them — a checkpoint that only reports is noise.'
+  )
+}
+
 /** Der Hinweis selbst. Englisch, weil er an das Modell geht; ohne Ankerliste. */
 export function phaseNudgeText(grownTokens: number, todos: unknown): string {
   const approxK = Math.round(grownTokens / 1000)
@@ -53,6 +71,7 @@ export function phaseNudgeText(grownTokens: number, todos: unknown): string {
     '(2) it replaces the WHOLE finished phase in one checkpoint, never a single step or a few tool calls; ' +
     '(3) the checkpoint must stay clearly smaller than the span it replaces — about one fifth or less; if you cannot reach that, do not compact; ' +
     '(4) cut at the end, not in the middle: the price of a cut is the number of tokens after the cut that must be read again (listed per marker below), and the stage boundary should sit at a 16384-token grid edge. ' +
+    '(5) ' + zwischenfazitText() + ' ' +
     'Write the checkpoint for the next similar task: keep measured pitfalls, exact paths/commands/IDs, numbers, rejected approaches with the reason, and the human\'s decisions.'
   )
 }

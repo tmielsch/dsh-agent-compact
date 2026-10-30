@@ -6,6 +6,7 @@ import {
   nudgeMode,
   phaseNudgeText,
   limitNudgeText,
+  zwischenfazitText,
 } from '../lib/phase.js'
 
 const done = [
@@ -101,4 +102,27 @@ test('gebautes lib/index.js trägt keine der widersprüchlichen Verdichtungs-For
     assert.equal(code.includes(w), false, 'noch vorhanden: ' + w)
   }
   assert.equal(code.includes('only at the end of a finished phase'), true)
+})
+
+test('zwischenfazitText: H1-Überschrift mit Pin, Wort ZWISCHENFAZIT, kein Code-Block, Handgriffe', () => {
+  const t = zwischenfazitText()
+  assert.match(t, /# 📌 ZWISCHENFAZIT/)
+  assert.match(t, /H1/)
+  assert.match(t, /never a code block/i)
+  assert.match(t, /search/i)
+  assert.match(t, /handgrips/i)
+})
+
+test('phaseNudgeText trägt den Zwischenfazit-Block als Bedingung (5)', () => {
+  const t = phaseNudgeText(60000, done)
+  assert.match(t, /\(5\)/)
+  assert.match(t, /# 📌 ZWISCHENFAZIT/)
+  assert.match(t, /scrollable marker/)
+})
+
+test('gebautes lib/phase.js trägt die Zwischenfazit-Regel', async () => {
+  const { readFileSync } = await import('node:fs')
+  const code = readFileSync(new URL('../lib/phase.js', import.meta.url), 'utf8')
+  assert.equal(code.includes('ZWISCHENFAZIT'), true)
+  assert.equal(code.toLowerCase().includes('never a code block'), true)
 })
