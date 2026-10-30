@@ -24,6 +24,10 @@ export interface CompactionLite {
   readonly shadowedSeqs: readonly number[]
   readonly shadowedTokenCount: number
   readonly summaryText: string
+  /** Optional: an older host sends records without the arithmetic (see the wire schema). */
+  readonly checkpointChars?: number
+  readonly checkpointTokensEstimate?: number
+  readonly writeDurationSeconds?: number | null
 }
 
 /** The few fields of a Chat node this logic reads. */
@@ -57,6 +61,18 @@ export interface BlockNode extends NodeLike {
     readonly rowsLoaded: number
     /** 'start' bar / checkpoint block, or 'end' bar. */
     readonly role: 'block' | 'end'
+    /** Freigegebene Token — `shadowedTokenCount`, carried through for the arithmetic line. */
+    readonly freedTokens: number
+    /** Größe des Checkpoints in Token (aus den Zeichen gerechnet), null when the log has no checkpoint text. */
+    readonly checkpointTokens: number | null
+    /** Zeichen der Checkpoint-Nachricht selbst; die Grundlage von `checkpointTokens`. */
+    readonly checkpointChars: number | null
+    /** Schreibdauer in Sekunden (start → summary), null when the log has no start time. */
+    readonly writeSeconds: number | null
+    /** Nettogewinn = Freigegebene Token − Größe des Checkpoints, null when the size is unknown. */
+    readonly netGainTokens: number | null
+    /** true when the checkpoint is larger than a fifth of the freed tokens (a case that barely paid off). */
+    readonly poorPayoff: boolean
   }
 }
 
@@ -254,6 +270,16 @@ export function computeHiding(
     if ([...(enclosing.get(c.compactionId) ?? [])].some((outer) => !expanded.has(outer))) continue
     const rowsLoaded = rows.get(c.compactionId) ?? 0
     const open = expanded.has(c.compactionId) && rowsLoaded > 0
+    // Die Rechnung der Verdichtung: Freigegebene Token sind `shadowedTokenCount`, die
+    // Größe des Checkpoints ist aus seinen Zeichen gerechnet (6,27 Zeichen pro
+    // Prompt-Token, gemessen), der Nettogewinn ist beides auseinander. Fehlt eine Zahl
+    // in der Log, steht sie null und die Zeile zeigt sie nicht.
+    const freed = c.shadowedTokenCount
+    const size = typeof c.checkpointTokensEstimate === 'number' ? c.checkpointTokensEstimate : null
+    const net = size === null ? null : freed - size
+    // Ein Fall, der sich kaum gelohnt hat: der Checkpoint ist größer als ein Fünftel
+    // des ersetzten Abschnitts (`Größe des Checkpoints > Freigegebene Token / 5`).
+    const poor = size !== null && size > freed / 5
     const make = (key: string, role: 'block' | 'end'): BlockNode => ({
       key,
       kind: role === 'end' ? END_KIND : BLOCK_KIND,
@@ -273,6 +299,12 @@ export function computeHiding(
         open,
         rowsLoaded,
         role,
+        freedTokens: freed,
+        checkpointTokens: size,
+        checkpointChars: typeof c.checkpointChars === 'number' ? c.checkpointChars : null,
+        writeSeconds: typeof c.writeDurationSeconds === 'number' ? c.writeDurationSeconds : null,
+        netGainTokens: net,
+        poorPayoff: poor,
       },
     })
     blocks.set(blockKey(c.compactionId), make(blockKey(c.compactionId), 'block'))
@@ -398,6 +430,39 @@ export const compactState = {
 export function tokensText(tokens: number): string {
   if (tokens >= 1000) return (tokens / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
   return String(tokens)
+}
+
+/** Short human text for a duration in seconds, German comma: 99.6 -> "99,6 s", 0.0 -> "0,0 s". */
+export function secondsText(seconds: number | null): string {
+  if (seconds === null) return ''
+  return seconds.toFixed(1).replace('.', ',') + ' s'
+}
+
+/**
+ * The arithmetic of one compaction, as one German line: Freigegebene Token, Größe des
+ * Checkpoints (aus den Zeichen gerechnet), Schreibdauer, Nettogewinn. A number the log
+ * does not carry is left out; a case that barely paid off (checkpoint larger than a
+ * fifth of the freed tokens) is named in the line.
+ */
+export function rechnungText(data: {
+  readonly freedTokens: number
+  readonly checkpointTokens: number | null
+  readonly checkpointChars: number | null
+  readonly writeSeconds: number | null
+  readonly netGainTokens: number | null
+  readonly poorPayoff: boolean
+}): string {
+  const parts: string[] = [`Freigegebene Token: ${tokensText(data.freedTokens)}`]
+  if (data.checkpointTokens !== null) {
+    const size = `Größe des Checkpoints: ≈${tokensText(data.checkpointTokens)} Token`
+    parts.push(data.checkpointChars !== null ? `${size} (aus ${data.checkpointChars} Zeichen gerechnet)` : size)
+  }
+  if (data.writeSeconds !== null) parts.push(`Schreibdauer: ${secondsText(data.writeSeconds)}`)
+  if (data.netGainTokens !== null) {
+    parts.push(`Nettogewinn: ${tokensText(data.netGainTokens)} Token`)
+    if (data.poorPayoff) parts.push('kaum gelohnt — der Checkpoint ist größer als ein Fünftel des ersetzten Abschnitts')
+  }
+  return parts.join(' · ')
 }
 
 /**
