@@ -23,6 +23,11 @@ if (schemaStart < 0 || schemaEnd < 0 || schemaEnd <= schemaStart) throw new Erro
 const schemaBlock = ctxSurfaceSrc
 	.slice(schemaStart, schemaEnd)
 	.replace(/^export const /gm, 'const ')
+	// `z.null()` would become the reserved literal `null()` after the prefix
+	// strip below — a TypeError at client boot ("null is not a function",
+	// 2026-10-30). The bundled zod has no binding named `null`; `literal(null)`
+	// is the same schema and survives the strip.
+	.replace(/\bz\.null\(\)/g, 'literal(null)')
 	.replace(/\bz\./g, '')
 	.replace(/\brequest\$schema\b/g, '_ctxSurface_read_request$schema')
 	.replace(/\bblock\$schema\b/g, '_ctxSurface_read_block$schema')
@@ -30,6 +35,9 @@ const schemaBlock = ctxSurfaceSrc
 	.replace(/\bresult\$schema\b/g, '_ctxSurface_read_result$schema')
 	.trim()
 if (!schemaBlock.includes('_ctxSurface_read_result$schema')) throw new Error('schema extraction failed: result$schema rename missed')
+// Guard: a bare null() call is always the `z.null()` strip bug; fail the build
+// instead of shipping a client bundle that dies at boot.
+if (/(^|[^.\w])null\s*\(/m.test(schemaBlock)) throw new Error('schema extraction produced a bare null() call; write z.literal(null) in src/ctx-surface.ts')
 
 // ---- 1. 从 dsh-api-remotes 提取内联的 zod 4.4.3 区段 ----
 // 走 Node 包导出解析（而非某个人机器上的绝对路径）：只要 devDependencies 装好，
