@@ -38,6 +38,12 @@ if (!schemaBlock.includes('_ctxSurface_read_result$schema')) throw new Error('sc
 // Guard: a bare null() call is always the `z.null()` strip bug; fail the build
 // instead of shipping a client bundle that dies at boot.
 if (/(^|[^.\w])null\s*\(/m.test(schemaBlock)) throw new Error('schema extraction produced a bare null() call; write z.literal(null) in src/ctx-surface.ts')
+// Guard: `z.null` WITHOUT parentheses (e.g. inside a union) survives the strip
+// as a bare `null` value, which is not a schema and fails at schema build in
+// the browser. The block guard above cannot see it (no parenthesis follows),
+// so reject it in the source region. Measured 2026-10-30 by the red team.
+const schemaRegion = ctxSurfaceSrc.slice(schemaStart, schemaEnd)
+if (/\bz\.null(?!\s*\()/m.test(schemaRegion)) throw new Error('schema region uses z.null without parentheses; write z.literal(null) in src/ctx-surface.ts')
 
 // ---- 1. 从 dsh-api-remotes 提取内联的 zod 4.4.3 区段 ----
 // 走 Node 包导出解析（而非某个人机器上的绝对路径）：只要 devDependencies 装好，
@@ -194,5 +200,12 @@ ${viewBundleCode}
 `
 
 const bundle = head + zodCode + tail
+// Guard on the WRITTEN bundle, not only the extracted block: the block guard
+// above misses `z.null` without parentheses (it becomes a bare `null` value,
+// which fails at schema build in the browser) and misses any null() call that
+// reaches the bundle from the React part. Measured 2026-10-30: the regex fires
+// on trunk.19 and compactchat.12 (the two bundles that died at client boot
+// with "null is not a function") and on neither trunk.20 nor any good build.
+if (/(^|[^.\w])null\s*\(/m.test(bundle)) throw new Error('client bundle contains a bare null() call; write z.literal(null) in src/ctx-surface.ts')
 writeFileSync(join(root, 'lib/client.js'), bundle)
 console.log('lib/client.js written,', bundle.length, 'bytes')
