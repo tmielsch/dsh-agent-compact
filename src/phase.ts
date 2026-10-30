@@ -56,7 +56,9 @@ export function zwischenfazitText(): string {
     'while scrolling), never a heading smaller than H1, and the word ZWISCHENFAZIT always spelled ' +
     'identically so the human can search for it. The heading carries the theme, so the block is readable ' +
     'without opening it. Under it, the first lines are the standing, the decision, and the handgrips that ' +
-    'come next in the order the human performs them — a checkpoint that only reports is noise.'
+    'come next in the order the human performs them — a checkpoint that only reports is noise. ' +
+    'The checkpoint carries only what the previous checkpoint did not: scrolling from block to block ' +
+    'should give the story by itself, so completeness is not the goal, orientation is.'
   )
 }
 
