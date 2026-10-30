@@ -1,6 +1,6 @@
 // `ctxSurface/read` 的主机侧 typert Remote 描述符。
 // schema 与类型都以 ./ctx-surface.ts 的 zod schema 为唯一源头，这里直接复用。
-import { request$schema, result$schema } from './ctx-surface.js'
+import { request$schema, result$schema, compactions_result$schema } from './ctx-surface.js'
 
 export const TYPERT = {
   package: '@tmielsch/rolling-compaction',
@@ -34,6 +34,31 @@ export const TYPERT = {
       },
       sourceLocation: { file: 'src/ctx-surface.ts', line: 181, column: 3 },
     },
+    {
+      id: '@tmielsch/rolling-compaction#ctxSurface/compactions',
+      service: 'ctxSurface',
+      namespace: 'ctxSurface',
+      method: 'compactions',
+      invocation: { kind: 'direct' },
+      parameters: [
+        {
+          name: 'request',
+          wire: 'request',
+          source: 'json',
+          codec: {
+            mode: 'strict',
+            typeSymbol: '@tmielsch/rolling-compaction/ctx-surface#CtxSurfaceReadRequest',
+            create: () => request$schema,
+          },
+        },
+      ],
+      result: {
+        mode: 'strict',
+        typeSymbol: '@tmielsch/rolling-compaction/ctx-surface#CtxSurfaceCompactionsResult',
+        create: () => compactions_result$schema,
+      },
+      sourceLocation: { file: 'src/ctx-surface.ts', line: 245, column: 3 },
+    },
   ],
   model: {
     services: [
@@ -52,6 +77,13 @@ export const TYPERT = {
             summary: 'Read the current folded surface rows of one session.',
             jsDoc: '/**\n * 读取某个会话当前的折叠 surface 行（已移除 shadowed 事件，按模型历史顺序，\n * 带 seq 标记）。\n * @param request - 要检查的会话。\n * @returns 折叠后的行，或显式失败。\n */',
           },
+          {
+            kind: 'method',
+            name: 'compactions',
+            signature: "@Remote('compactions') async compactions(request: CtxSurfaceReadRequest): Promise<CtxSurfaceCompactionsResult>",
+            summary: 'Read every compaction of one session from its raw log.',
+            jsDoc: '/**\n * Read every compaction of a session from its raw log: where the checkpoint\n * sits, which events it replaced, and the checkpoint text. Read-only.\n */',
+          },
         ],
         types: [
           {
@@ -65,6 +97,14 @@ export const TYPERT = {
           {
             name: 'CtxSurfaceReadRequest',
             declaration: "type CtxSurfaceReadRequest = z.infer<typeof request$schema>; // { sessionId: string }",
+          },
+          {
+            name: 'CtxSurfaceCompaction',
+            declaration: "type CtxSurfaceCompaction = z.infer<typeof compaction$schema>; // { compactionId: string; checkpointSeq: number; startSeq: number; endSeq: number; shadowedSeqs: readonly number[]; shadowedTokenCount: number; summaryText: string }",
+          },
+          {
+            name: 'CtxSurfaceCompactionsResult',
+            declaration: "type CtxSurfaceCompactionsResult = z.infer<typeof compactions_result$schema>; // { compactions: readonly CtxSurfaceCompaction[] }",
           },
           {
             name: 'CtxSurfaceReadResult',

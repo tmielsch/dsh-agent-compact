@@ -23,6 +23,11 @@ if (schemaStart < 0 || schemaEnd < 0 || schemaEnd <= schemaStart) throw new Erro
 const schemaBlock = ctxSurfaceSrc
 	.slice(schemaStart, schemaEnd)
 	.replace(/^export const /gm, 'const ')
+	// `z.null()` would become the reserved literal `null()` after the prefix
+	// strip below — a TypeError at client boot ("null is not a function",
+	// 2026-10-30). The bundled zod has no binding named `null`; `literal(null)`
+	// is the same schema and survives the strip.
+	.replace(/\bz\.null\(\)/g, 'literal(null)')
 	.replace(/\bz\./g, '')
 	.replace(/\brequest\$schema\b/g, '_ctxSurface_read_request$schema')
 	.replace(/\bblock\$schema\b/g, '_ctxSurface_read_block$schema')
@@ -30,6 +35,9 @@ const schemaBlock = ctxSurfaceSrc
 	.replace(/\bresult\$schema\b/g, '_ctxSurface_read_result$schema')
 	.trim()
 if (!schemaBlock.includes('_ctxSurface_read_result$schema')) throw new Error('schema extraction failed: result$schema rename missed')
+// Guard: a bare null() call is always the `z.null()` strip bug; fail the build
+// instead of shipping a client bundle that dies at boot.
+if (/(^|[^.\w])null\s*\(/m.test(schemaBlock)) throw new Error('schema extraction produced a bare null() call; write z.literal(null) in src/ctx-surface.ts')
 
 // ---- 1. 从 dsh-api-remotes 提取内联的 zod 4.4.3 区段 ----
 // 走 Node 包导出解析（而非某个人机器上的绝对路径）：只要 devDependencies 装好，
@@ -53,7 +61,7 @@ const viewBuild = esbuild.buildSync({
 	platform: 'browser',
 	target: 'es2020',
 	jsx: 'automatic',
-	external: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
+	external: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', '@deepseek-ai/dsh-client-ui-primitives'],
 	logLevel: 'silent',
 })
 if (viewBuild.errors.length > 0) throw new Error('esbuild failed:\n' + viewBuild.errors.map((e) => e.text).join('\n'))
@@ -96,6 +104,28 @@ const tail = `
 					create: () => _ctxSurface_read_result$schema,
 				},
 				sourceLocation: { file: 'src/ctx-surface.ts', line: 181, column: 3 },
+			}, {
+				id: '@tmielsch/rolling-compaction#ctxSurface/compactions',
+				service: 'ctxSurface',
+				namespace: 'ctxSurface',
+				method: 'compactions',
+				invocation: { kind: 'direct' },
+				parameters: [{
+					name: 'request',
+					wire: 'request',
+					source: 'json',
+					codec: {
+						mode: 'strict',
+						typeSymbol: '@tmielsch/rolling-compaction/ctx-surface#CtxSurfaceReadRequest',
+						create: () => _ctxSurface_read_request$schema,
+					},
+				}],
+				result: {
+					mode: 'strict',
+					typeSymbol: '@tmielsch/rolling-compaction/ctx-surface#CtxSurfaceCompactionsResult',
+					create: () => compactions_result$schema,
+				},
+				sourceLocation: { file: 'src/ctx-surface.ts', line: 245, column: 3 },
 			}],
 		}
 		//#endregion
@@ -108,6 +138,7 @@ ${viewBundleCode}
 			return module.exports;
 		})();
 		const CtxSurfaceView = ctxSurfaceViewModule.CtxSurfaceView;
+		const registerCompactChat = ctxSurfaceViewModule.registerCompactChat;
 		const CSS_TAG = ctxSurfaceViewModule.CSS_TAG;
 		const CTX_SURFACE_CSS = ctxSurfaceViewModule.CSS;
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(CSS_TAG) + "]") === null) {
@@ -132,11 +163,23 @@ ${viewBundleCode}
 						name: "conversation.view",
 						id: "ctx-surface",
 						order: 20,
-						label: () => "上下文",
+						label: () => "Model Context",
 						inject: () => ({
 							readSurface: (request) => sub.remote.ctxSurface.read(request),
 						}),
 					}, CtxSurfaceView));
+					// Compact Chat: second Chat tab with collapsible compaction blocks. Fails soft.
+					let disposeCompactChat = () => {};
+					try {
+						disposeCompactChat = registerCompactChat(
+							sub.slots,
+							(request) => sub.remote.ctxSurface.compactions(request),
+							(message) => { try { console.warn(message); } catch (_) {} },
+						);
+					} catch (error) {
+						try { console.warn("[rolling-compaction] Compact Chat disabled: " + (error && error.message ? error.message : error)); } catch (_) {}
+					}
+					return () => { disposeCompactChat(); };
 				},
 			});
 			return () => {};

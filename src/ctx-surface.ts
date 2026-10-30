@@ -6,6 +6,7 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { blockText, blocksText, nodeContent } from './surface-text.js'
+import { readCompactions } from './compactions.js'
 
 // ---- 线上类型（schema 为唯一源头，host/client 描述符直接复用；类型由 schema
 // 推导。下面的 schema 定义区段会被 scripts/build-client.mjs 提取进浏览器 bundle，
@@ -39,6 +40,25 @@ export const row$schema = z.object({
 export const result$schema = z.object({
   rows: z.array(row$schema).readonly(),
 }).readonly()
+// Compact Chat: one record per compaction, read from the raw log (see ./compactions.ts).
+export const compaction$schema = z.object({
+  compactionId: z.string().readonly(),
+  checkpointSeq: z.number().readonly(),
+  startSeq: z.number().readonly(),
+  endSeq: z.number().readonly(),
+  shadowedSeqs: z.array(z.number()).readonly(),
+  shadowedTokenCount: z.number().readonly(),
+  summaryText: z.string().readonly(),
+  // The compaction's arithmetic. Optional: the host process is not hot-reloaded while
+  // the client bundle is, so there is an update window between the two ends.
+  checkpointChars: z.number().readonly().optional(),
+  checkpointTokensEstimate: z.number().readonly().optional(),
+  writeDurationSeconds: z.union([z.number(), z.literal(null)]).readonly().optional(),
+})
+
+export const compactions_result$schema = z.object({
+  compactions: z.array(compaction$schema).readonly(),
+}).readonly()
 // ctx-surface wire schemas end（提取区段终点）
 
 export type CtxSurfaceBlock = z.infer<typeof block$schema>
@@ -48,6 +68,8 @@ export type CtxSurfaceReadRequest = z.infer<typeof request$schema>
 // 注意：传输层会把本方法结果包进 `{ok,value}` / `{ok:false,error}` 信封，
 // 这里不要重复该形状，失败时直接抛错即可。
 export type CtxSurfaceReadResult = z.infer<typeof result$schema>
+export type CtxSurfaceCompaction = z.infer<typeof compaction$schema>
+export type CtxSurfaceCompactionsResult = z.infer<typeof compactions_result$schema>
 
 // ---- 仅主机端使用的辅助函数 ----
 
@@ -65,6 +87,7 @@ interface SurfaceNodeData {
 
 interface SessionQueryLike {
   readSurface(sessionId: string): Promise<{ events?: unknown } | null>
+  readSession(sessionId: string): Promise<{ events?: unknown } | null>
 }
 
 interface AnyBlock {
@@ -200,5 +223,29 @@ export class CtxSurfaceService extends TypertRemoteService {
       if (row) rows.push(row)
     }
     return { rows }
+  }
+
+  /**
+   * Read every compaction of a session from its raw log: where the checkpoint
+   * sits, which events it replaced, and the checkpoint text. Read-only.
+   * @param request - session to inspect.
+   * @returns compaction records in log order.
+   */
+  @Remote('compactions')
+  async compactions(request: CtxSurfaceReadRequest): Promise<CtxSurfaceCompactionsResult> {
+    const sessionQuery = this.ctx.get('sessionQuery') as SessionQueryLike | undefined
+    if (!sessionQuery) {
+      throw new Error('session-query-unavailable')
+    }
+    let snap: { events?: unknown } | null
+    try {
+      snap = await sessionQuery.readSession(request.sessionId)
+    } catch (err) {
+      const message = err && (err as Error).message ? (err as Error).message : String(err)
+      this.ctx.logger.warn('[agent-compact] ctxSurface/compactions failed for %s: %s', request.sessionId, message)
+      throw new Error(message)
+    }
+    const events = snap && Array.isArray(snap.events) ? (snap.events as unknown[]) : []
+    return { compactions: readCompactions(events) }
   }
 }
