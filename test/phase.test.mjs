@@ -4,7 +4,6 @@ import {
   phaseComplete,
   phaseCounts,
   nudgeMode,
-  phaseNudgeText,
   limitNudgeText,
   zwischenfazitText,
 } from '../lib/phase.js'
@@ -34,57 +33,61 @@ test('phaseCounts: zählt Punkte und abgeschlossene Punkte', () => {
   assert.deepEqual(phaseCounts(null), { total: 0, completed: 0 })
 })
 
-test('nudgeMode: ohne Liste kein Hinweis, auch bei großem Wachstum (das war der Fehler von heute)', () => {
-  assert.equal(nudgeMode(120000, 50000, 200000, 300000, null), null)
-  assert.equal(nudgeMode(120000, 50000, 200000, 300000, open), null)
+test('nudgeMode: die harte Obergrenze ist das einzige Auslöser-Signal', () => {
+  assert.equal(nudgeMode(300000, 300000), 'limit')
+  assert.equal(nudgeMode(350000, 300000), 'limit')
+  assert.equal(nudgeMode(299999, 300000), null)
+  assert.equal(nudgeMode(900000, 0), null)
 })
 
-test('nudgeMode: Phasenende plus genug Wachstum ergibt den Phasen-Hinweis', () => {
-  assert.equal(nudgeMode(50000, 50000, 200000, 300000, done), 'phase')
-  assert.equal(nudgeMode(80000, 50000, 200000, 300000, done), 'phase')
-})
-
-test('nudgeMode: Phasenende, aber zu wenig Wachstum seit dem letzten Checkpoint, ergibt keinen Hinweis', () => {
-  assert.equal(nudgeMode(49999, 50000, 200000, 300000, done), null)
-  assert.equal(nudgeMode(0, 50000, 200000, 300000, done), null)
-})
-
-test('nudgeMode: die harte Obergrenze greift auch ohne Liste und ohne Wachstumsschwelle', () => {
-  assert.equal(nudgeMode(1000, 50000, 300000, 300000, null), 'limit')
-  assert.equal(nudgeMode(1000, 50000, 350000, 300000, open), 'limit')
-  assert.equal(nudgeMode(1000, 50000, 299999, 300000, null), null)
-})
-
-test('nudgeMode: Schwelle 0 schaltet die Phasenregel ab, Obergrenze 0 schaltet die Obergrenze ab', () => {
-  assert.equal(nudgeMode(500000, 0, 200000, 300000, done), null)
-  assert.equal(nudgeMode(500000, 50000, 900000, 0, null), null)
-  assert.equal(nudgeMode(500000, 50000, 900000, 0, done), 'phase')
-})
-
-test('phaseNudgeText: nennt Zahlen der Liste, das Ende des eigenen Zugs und die Fünftel-Regel', () => {
-  const t = phaseNudgeText(61000, done)
-  assert.match(t, /2 of 2 items done/)
-  assert.match(t, /61k tokens/)
-  assert.match(t, /LAST action of this turn/)
-  assert.match(t, /never a reply to a message of the human/)
-  assert.match(t, /one fifth or less/)
-  assert.match(t, /WHOLE finished phase/)
-})
-
-test('Hinweistexte widersprechen sich nicht: kein Wort von kleinen Spans oder sofortigem Verdichten', () => {
-  for (const t of [phaseNudgeText(61000, done), limitNudgeText(310000)]) {
-    assert.doesNotMatch(t, /smaller spans/i)
-    assert.doesNotMatch(t, /as soon as/i)
-    assert.doesNotMatch(t, /routine memory hygiene/i)
-    assert.doesNotMatch(t, /not a last resort/i)
-  }
+test('nudgeMode hat keinen Wachstums-Parameter mehr: der Phasenhinweis ist entfernt', () => {
+  // Anordnung des Menschen 2026-10-30: „der phasenhinweis muss raus“.
+  // Die Signatur nimmt genau zwei Argumente; ein drittes wird ignoriert.
+  assert.equal(nudgeMode.length, 2)
+  assert.equal(nudgeMode(120000, 300000, 200000, 50000, done), null)
 })
 
 test('limitNudgeText: nennt die Belegung in k Token und verlangt dieselbe Zugform', () => {
   const t = limitNudgeText(310000)
   assert.match(t, /310k tokens/)
   assert.match(t, /LAST action of this turn/)
-  assert.match(t, /clearly smaller/)
+  assert.match(t, /never a reply to a message of the human/)
+  assert.match(t, /BACK end of the surface/)
+})
+
+test('limitNudgeText verlangt Lossless, nicht eine Größenobergrenze', () => {
+  const t = limitNudgeText(310000)
+  assert.match(t, /Lossless is mandatory/)
+  assert.match(t, /small details included/)
+  assert.match(t, /no size cap/)
+  assert.doesNotMatch(t, /one fifth/)
+  assert.doesNotMatch(t, /clearly smaller/)
+})
+
+test('limitNudgeText trägt den Zwischenfazit-Block als Bedingung (3)', () => {
+  const t = limitNudgeText(310000)
+  assert.match(t, /\(3\)/)
+  assert.match(t, /# 📌 ZWISCHENFAZIT/)
+  assert.match(t, /scrollable marker/)
+})
+
+test('zwischenfazitText: H1-Überschrift mit Pin, Wort ZWISCHENFAZIT, kein Code-Block, Handgriffe', () => {
+  const t = zwischenfazitText()
+  assert.match(t, /# 📌 ZWISCHENFAZIT/)
+  assert.match(t, /H1/)
+  assert.match(t, /never a code block/i)
+  assert.match(t, /search/i)
+  assert.match(t, /handgrips/i)
+  assert.match(t, /Lossless is mandatory/)
+  assert.match(t, /context_recall/)
+})
+
+test('kein Phasenhinweis mehr: phaseNudgeText existiert im gebauten phase.js nicht', async () => {
+  const { readFileSync } = await import('node:fs')
+  const code = readFileSync(new URL('../lib/phase.js', import.meta.url), 'utf8')
+  assert.equal(code.includes('phaseNudgeText'), false, 'noch vorhanden: phaseNudgeText')
+  assert.equal(code.includes('2 of 2 items done'), false)
+  assert.equal(code.includes('one fifth or less'), false)
 })
 
 test('gebautes lib/index.js trägt keine der widersprüchlichen Verdichtungs-Formulierungen mehr', async () => {
@@ -98,26 +101,19 @@ test('gebautes lib/index.js trägt keine der widersprüchlichen Verdichtungs-For
     'Evaluate whenever a span',
     'compact each finished step',
     'Prefer a rare, big compaction',
+    'one fifth or less',
+    'clearly smaller than the span it replaces',
+    'checkpoint must be smaller than the compressed span',
+    'must be smaller than the compressed content',
+    'volumeNudgeTokens',
+    'volumeBaseline',
+    'todosOf',
   ]) {
     assert.equal(code.includes(w), false, 'noch vorhanden: ' + w)
   }
   assert.equal(code.includes('only at the end of a finished phase'), true)
-})
-
-test('zwischenfazitText: H1-Überschrift mit Pin, Wort ZWISCHENFAZIT, kein Code-Block, Handgriffe', () => {
-  const t = zwischenfazitText()
-  assert.match(t, /# 📌 ZWISCHENFAZIT/)
-  assert.match(t, /H1/)
-  assert.match(t, /never a code block/i)
-  assert.match(t, /search/i)
-  assert.match(t, /handgrips/i)
-})
-
-test('phaseNudgeText trägt den Zwischenfazit-Block als Bedingung (5)', () => {
-  const t = phaseNudgeText(60000, done)
-  assert.match(t, /\(5\)/)
-  assert.match(t, /# 📌 ZWISCHENFAZIT/)
-  assert.match(t, /scrollable marker/)
+  assert.equal(code.includes('Lossless is mandatory'), true)
+  assert.equal(code.includes('contextHardLimitTokens'), true)
 })
 
 test('gebautes lib/phase.js trägt die Zwischenfazit-Regel', async () => {

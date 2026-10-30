@@ -1,12 +1,26 @@
-// Phasenregel (2026-10-30, Entscheidung des Menschen): Verdichtet wird nur am
-// Ende einer abgeschlossenen Phase, und dann die ganze Phase auf einmal.
-// Eine Phase endet, wenn die Aufgabenliste des laufenden Zugs vollständig
-// abgearbeitet ist. Ein einzelner abgeschlossener Handgriff ist kein Phasenende.
+// Phasenregel (2026-10-30, Entscheidungen des Menschen):
 //
-// Die Aufgabenliste lebt in der Projektion `todos` (dsh-tool-todo): ein Array
-// aus { content, status } oder null, und sie wird bei jedem `turn/start`
-// zurückgesetzt. Das Phasenende ist damit ein Ereignis innerhalb eines Zugs und
-// kein Dauerzustand: Mit dem nächsten Nachricht des Menschen verschwindet es.
+// 1. Verdichtet wird nur am Ende einer abgeschlossenen Phase, die ganze Phase in
+//    einem Checkpoint, als letzte Handlung des Zugs, nie als Antwort auf eine
+//    Nachricht des Menschen. Diese Regel steht im Werkzeugtext und im
+//    Systemprompt. Der Phasenhinweis ist am 30.10.2026 entfernt worden
+//    (Anordnung des Menschen, wörtlich: „der phasenhinweis muss raus“), weil er
+//    das Modell zum Verdichten triez — der Belegfall der drei Verdichtungen in
+//    Folge.
+// 2. Lossless ist Pflicht (Anordnung des Menschen vom 30.10.2026, wörtlich:
+//    „Lossless ist Pflicht. Auch kleine Details sind nachher wichtig und dürfen
+//    nicht verloren gehen“). Die frühere Größenregel — der Checkpoint dürfe höchstens
+//    ein Fünftel des ersetzten Abschnitts füllen — ist verworfen: sie steht im
+//    Widerspruch zu Lossless und zum Schutz des Kerns
+//    (`dsh-compaction-basic` Zeile 601: die Zusammenfassung darf nicht kleiner
+//    sein als der verdeckte Inhalt).
+// 3. Die einzige Auslöser-Meldung, die bleibt, ist die harte Obergrenze: wird der
+//    Kontext zu groß, wird trotzdem verdichtet, auch ohne abgeschlossene Phase.
+//
+// Die Aufgabenliste lebt in der Projektion `todos` (dsh-tool-todo): ein Array aus
+// { content, status } oder null, bei jedem `turn/start` zurückgesetzt.
+// `phaseComplete` bleibt als reine Hilfsfunktion für die Regel 1; der Hinweis
+// feuert nicht mehr.
 
 export interface TodoItemLike {
   content?: unknown
@@ -19,7 +33,7 @@ export function phaseComplete(todos: unknown): boolean {
   return (todos as TodoItemLike[]).every((t) => !!t && t.status === 'completed')
 }
 
-/** Anzahl der Punkte und der abgeschlossenen Punkte, für die Meldung an das Modell. */
+/** Anzahl der Punkte und der abgeschlossenen Punkte. */
 export function phaseCounts(todos: unknown): { total: number; completed: number } {
   if (!Array.isArray(todos)) return { total: 0, completed: 0 }
   const list = todos as TodoItemLike[]
@@ -27,19 +41,15 @@ export function phaseCounts(todos: unknown): { total: number; completed: number 
 }
 
 /**
- * Entscheidet, ob und in welcher Form der Hinweis erscheint.
- *  - 'phase': genug Wachstum seit dem letzten Checkpoint UND Phasenende.
- *  - 'limit': harte Obergrenze der Belegung erreicht, unabhängig von der Liste.
- *  - null: kein Hinweis. Schwellenwert 0 oder kleiner schaltet 'phase' ab,
- *    Obergrenze 0 oder kleiner schaltet 'limit' ab.
+ * Entscheidet, ob der Hinweis erscheint. Der Phasenhinweis ist entfernt; es gibt
+ * nur die harte Obergrenze.
+ *  - 'limit': Belegung erreicht die Obergrenze, unabhängig von der Liste.
+ *  - null: kein Hinweis. Obergrenze 0 oder kleiner schaltet sie ab.
  */
-export type NudgeMode = 'phase' | 'limit' | null
+export type NudgeMode = 'limit' | null
 
-export function nudgeMode(grownTokens: number, thresholdTokens: number, occupancyTokens: number, hardLimitTokens: number, todos: unknown): NudgeMode {
-  if (hardLimitTokens > 0 && occupancyTokens >= hardLimitTokens) return 'limit'
-  if (!(thresholdTokens > 0)) return null
-  if (!(grownTokens >= thresholdTokens)) return null
-  return phaseComplete(todos) ? 'phase' : null
+export function nudgeMode(occupancyTokens: number, hardLimitTokens: number): NudgeMode {
+  return hardLimitTokens > 0 && occupancyTokens >= hardLimitTokens ? 'limit' : null
 }
 
 /**
@@ -47,6 +57,11 @@ export function nudgeMode(grownTokens: number, thresholdTokens: number, occupanc
  * 30.10.2026): Der Checkpoint ist der scrollbare Block im Chat, nicht ein
  * verborgenes Artefakt. Er beginnt mit einer Überschrift, die der Mensch beim
  * Durchscrollen sofort erkennt, und steht am Ende des Zugs.
+ *
+ * Lossless ist Pflicht: Der Checkpoint trägt jedes Detail, das nachher gebraucht
+ * wird, auch die kleinen. Der Zwischenfazit-Block oben ist kurz (Stand,
+ * Entscheidung, nächste Handgriffe), die technischen Abschnitte darunter sind
+ * vollständig.
  */
 export function zwischenfazitText(): string {
   return (
@@ -55,26 +70,14 @@ export function zwischenfazitText(): string {
     'then the sections below. Never a code block (a code block renders monospace and does not stand out ' +
     'while scrolling), never a heading smaller than H1, and the word ZWISCHENFAZIT always spelled ' +
     'identically so the human can search for it. The heading carries the theme, so the block is readable ' +
-    'without opening it. Under it, the first lines are the standing, the decision, and the handgrips that ' +
-    'come next in the order the human performs them — a checkpoint that only reports is noise. ' +
-    'The checkpoint carries only what the previous checkpoint did not: scrolling from block to block ' +
-    'should give the story by itself, so completeness is not the goal, orientation is.'
-  )
-}
-
-/** Der Hinweis selbst. Englisch, weil er an das Modell geht; ohne Ankerliste. */
-export function phaseNudgeText(grownTokens: number, todos: unknown): string {
-  const approxK = Math.round(grownTokens / 1000)
-  const { total } = phaseCounts(todos)
-  return (
-    '`context_compact` — phase end: the todo list of this turn is complete (' + total + ' of ' + total + ' items done) and the surface has grown by roughly ' + approxK +
-    'k tokens since the last compaction. A compaction is allowed now, under these conditions only: ' +
-    '(1) it is the LAST action of this turn, after you have answered the human — never a reply to a message of the human; ' +
-    '(2) it replaces the WHOLE finished phase in one checkpoint, never a single step or a few tool calls; ' +
-    '(3) the checkpoint must stay clearly smaller than the span it replaces — about one fifth or less; if you cannot reach that, do not compact; ' +
-    '(4) cut at the end, not in the middle: the price of a cut is the number of tokens after the cut that must be read again (listed per marker below), and the stage boundary should sit at a 16384-token grid edge. ' +
-    '(5) ' + zwischenfazitText() + ' ' +
-    'Write the checkpoint for the next similar task: keep measured pitfalls, exact paths/commands/IDs, numbers, rejected approaches with the reason, and the human\'s decisions.'
+    'without opening it. Under the heading, the first lines are the standing, the decision, and the ' +
+    'handgrips that come next in the order the human performs them — a checkpoint that only reports is ' +
+    'noise. Keep that top block short; the technical sections below it are complete. ' +
+    'Lossless is mandatory: the checkpoint must carry every detail that will be needed afterwards, small ' +
+    'details included — exact paths, commands, IDs, names, numbers, the human\'s decisions and wording. ' +
+    'There is no size cap on the checkpoint: a checkpoint that drops a detail to stay small is a failed ' +
+    'compaction. Nothing that served the work may be lost by the compaction. The archive behind ' +
+    'context_recall is the safety net for the raw span, never for a detail the checkpoint dropped.'
   )
 }
 
@@ -86,7 +89,7 @@ export function limitNudgeText(occupancyTokens: number): string {
     'A compaction is allowed now even without a finished todo list, under these conditions: ' +
     '(1) it is the LAST action of this turn, after you have answered the human — never a reply to a message of the human; ' +
     '(2) take the largest finished stretch at the BACK end of the surface in one checkpoint, not many small ones; ' +
-    '(3) the checkpoint must stay clearly smaller than the span it replaces; ' +
+    '(3) ' + zwischenfazitText() + ' ' +
     '(4) the price of a cut is listed per marker below — prefer the cheapest cut that frees enough.'
   )
 }
