@@ -76,9 +76,21 @@ test('resolveBoundaries: omitted startAnchor defaults to the first node', () => 
   assert.match(b.method, /start=first/)
 })
 
-test('resolveBoundaries: missing endAnchor throws an actionable error', () => {
-  const nodes = [userNode(1, 'hello')]
-  assert.throws(() => resolveBoundaries(nodes, {}), /provide endAnchor/)
+test('resolveBoundaries: omitted endAnchor defaults to the LAST node (Layer-Cake cut)', () => {
+  const nodes = [userNode(1, 'hello'), assistantTextNode(2, 'hi back'), userNode(3, 'next task')]
+  const b = resolveBoundaries(nodes, { startAnchor: 'hello' })
+  assert.equal(b.startSeq, 1)
+  assert.equal(b.endSeq, 3)
+  assert.equal(b.method, 'start=anchor + end=last-node')
+})
+
+test('resolveBoundaries: both anchors omitted spans the whole exchange after the system head', () => {
+  const nodes = [systemNode(0, 'system prompt'), userNode(1, 'hello'), assistantTextNode(2, 'hi back')]
+  const b = resolveBoundaries(nodes, {})
+  assert.equal(b.startSeq, 1)
+  assert.equal(b.endSeq, 2)
+  assert.match(b.method, /start=after-system/)
+  assert.match(b.method, /end=last-node/)
 })
 
 test('resolveBoundaries: ambiguous anchor lists every matching hit', () => {
@@ -480,4 +492,19 @@ test('nodeSummaryLine: the candidate line carries the cut price', () => {
   // Modell den Preis eines Schnitts in der Mitte gegen einen am Ende vergleichen
   // kann, ohne ihn zu raten.
   assert.match(message, /cut price ≈ \d+ tokens/)
+})
+
+test('gebautes lib/index.js trägt die Endpunkt-Regel: endAnchor optional, Vorgabe letzter Knoten', async () => {
+  const { readFileSync } = await import('node:fs')
+  const code = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+  assert.equal(code.includes('endAnchor may be OMITTED'), true)
+  assert.equal(code.includes('LAST node on the surface'), true)
+  assert.equal(code.includes('in-flight answer'), true)
+  // Die alte Pflicht-Formulierung des ENDPUNKTS darf nicht zurückkehren. Der
+  // summary-Feldtext sagt weiterhin "Required for scope" (summary ist Pflicht),
+  // also prüfen wir den endAnchor-Beschreibungstext isoliert.
+  const endDesc = code.slice(code.indexOf('endAnchor: { type'), code.indexOf('summary: { type'))
+  assert.match(endDesc, /OPTIONAL: omit it/)
+  assert.equal(endDesc.includes('Required for scope'), false)
+  assert.equal(code.includes('provide endAnchor'), false)
 })

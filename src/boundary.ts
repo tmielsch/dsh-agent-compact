@@ -338,10 +338,10 @@ export function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: un
   if (!nodes.length) throw new Error('surface is empty; nothing to compact')
   const startAnchor = typeof args.startAnchor === 'string' && args.startAnchor.trim() ? args.startAnchor : ''
   const endAnchor = typeof args.endAnchor === 'string' && args.endAnchor.trim() ? args.endAnchor : ''
-  // 结束侧是「必需」的，用来界定区间；起点默认取第一个节点。
-  if (!endAnchor) {
-    throw new Error('cannot resolve the end boundary: provide endAnchor — verbatim text that is a UNIQUE PREFIX of the LAST node of the span to compress (that node itself is compressed; use its predecessor to keep it)')
-  }
+  // 结束侧默认取最后一个节点（Layer-Cake: der Schnitt sitzt am Ende der
+  // Oberfläche, und der laufende Zug steht nicht auf der Oberfläche — ein
+  // Anker auf den eigenen Antworttext kann nie gefunden werden). Ein
+  // expliziter endAnchor bleibt möglich, um einen früheren Schnitt zu wählen.
   const method: string[] = []
   // Fork: node 0 holds the system prompt, and the harness protects it. A span
   // that starts on it is rejected by the loader *after* the summary has been
@@ -362,8 +362,14 @@ export function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: un
     si = head
     method.push(head > 0 ? 'start=after-system' : 'start=first')
   }
-  let ei = resolveUniqueHit(nodes, endAnchor, 'endAnchor')
-  method.push('end=anchor')
+  let ei: number
+  if (endAnchor) {
+    ei = resolveUniqueHit(nodes, endAnchor, 'endAnchor')
+    method.push('end=anchor')
+  } else {
+    ei = nodes.length - 1
+    method.push('end=last-node')
+  }
   if (si > ei) {
     throw new Error('resolved start sits after resolved end on the surface (start pos ' + si + ', end pos ' + ei + ')')
   }
