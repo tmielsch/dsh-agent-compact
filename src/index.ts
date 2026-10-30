@@ -16,7 +16,7 @@ import { normText } from './normalize.js'
 import { CtxSurfaceService } from './ctx-surface.js'
 import { prefixHits, resolveBoundaries, soleToolCall, spanText, tailCutPrice } from './boundary.js'
 import { markerTag } from './anchor.js'
-import { limitNudgeText, nudgeMode, phaseNudgeText } from './phase.js'
+import { limitNudgeText, nudgeMode } from './phase.js'
 import { nodeFlatText } from './surface-text.js'
 import { ForkRegistry, SharedTrunkMemo } from './memo.js'
 import { forkCut, forkParent, lockedSpanError, surfaceEvents } from './trunk.js'
@@ -31,7 +31,6 @@ export const inject = ['tools', 'systemPrompt']
 
 export interface Config {
   autoArchive: boolean
-  volumeNudgeTokens: number
   contextHardLimitTokens: number
   sharedStoreDir: string
   trunkGuard: boolean
@@ -41,8 +40,7 @@ export interface Config {
 export const Config: Schema<Config> = Schema.object({
   autoArchive: Schema.boolean().default(true).description('context_compact saves the full raw span to a spill artifact before replacing it.'),
   keepFailedSummary: Schema.boolean().default(true).description('A failed compaction keeps the written checkpoint text: the retry may omit `summary` to reuse it unchanged (in memory for this process only; a rewrite after a restart copies it from the previous message).'),
-  volumeNudgeTokens: Schema.number().default(50000).description('Phase rule: the compaction hint appears only when the surface has grown by at least this many tokens since the last compaction AND the todo list of the running turn is complete (a finished phase). Set to 0 to disable the phase hint.'),
-  contextHardLimitTokens: Schema.number().default(300000).description('Upper bound: when the context occupancy reaches this many tokens, the hint appears even without a finished todo list. Set to 0 to disable.'),
+  contextHardLimitTokens: Schema.number().default(300000).description('Upper bound: when the context occupancy reaches this many tokens, the hint appears. Set to 0 to disable. This is the only trigger message the plugin sends; the phase hint was removed on 2026-10-30 by the human\'s order ("der phasenhinweis muss raus"), because a hint that fires on growth pushed the session into compactions it did not need.'),
   sharedStoreDir: Schema.string().default('').description('Directory for the shared-trunk memo (content-addressed trunk checkpoints) and the fork registry. Empty keeps both in memory only, so they do not survive a restart.'),
   trunkGuard: Schema.boolean().default(true).description('Guard automatic compaction in forked sessions (and in parents with known forks): a range reaching into the inherited trunk becomes the shared trunk compaction, or is clamped to start after it.'),
 })
@@ -144,14 +142,14 @@ export function apply(ctx: Context, config: Config) {
     sourceEventSeqs?: unknown
   }
 
-  // 用会话占用量的增长量作为提醒信号：自上次压缩以来增长每跨过
-  // config.volumeNudgeTokens 的一个整数倍，就提示模型考虑压缩。
+  // 会话占用量作为提醒信号：达到 config.contextHardLimitTokens 时提示模型压缩。
+  // Der Phasenhinweis (Wachstum seit der letzten Verdichtung) ist am 30.10.2026
+  // vom Menschen entfernt worden; die Belegung ist das einzige Auslöser-Signal.
   // 度量指标按优先级：
   //  1. sessionProjections 的 contextPressure.projectedTokens（provider 真实
   //     usage 的投影，每次 LLM 调用都会重新同步到真实值）；
   //  2. tokenMeter 的 surfaceTokens（chars/4 启发式），仅当 (1) 不可用时使用。
-  // 两者均按会话增量累积，服务缺席时整个特性降级为 no-op。
-  const volumeBaseline = new WeakMap<SessionLike, number>()
+  // 服务缺席时整个特性降级为 no-op。
 
   interface TokenMeterLike {
     measure(session: SessionLike): { surfaceTokens?: number } | null | undefined
@@ -182,21 +180,6 @@ export function apply(ctx: Context, config: Config) {
       const contextPressure = values ? (values as { contextPressure?: { projectedTokens?: unknown } }).contextPressure : undefined
       const projected = contextPressure && typeof contextPressure.projectedTokens === 'number' ? contextPressure.projectedTokens : null
       return projected
-    } catch (e) {
-      return null
-    }
-  }
-
-  // Die Aufgabenliste des laufenden Zugs (Projektion `todos` aus dsh-tool-todo):
-  // ein Array aus { content, status } oder null. Fehlt der Dienst, ist die
-  // Antwort null, und die Phasenregel schweigt (nur die Obergrenze greift).
-  function todosOf(session: SessionLike): unknown {
-    const projections = ctx.get('sessionProjections') as SessionProjectionsLike | undefined
-    if (!projections || typeof projections.snapshot !== 'function') return null
-    try {
-      const snap = projections.snapshot(session)
-      const values = snap && snap.values
-      return values ? (values as { todos?: unknown }).todos ?? null : null
     } catch (e) {
       return null
     }
@@ -315,20 +298,9 @@ export function apply(ctx: Context, config: Config) {
     disposers.push(systemPrompt.section({
       name: 'tool:context_compact',
       order: 118,
-      text: 'Use the context_compact tool only at the end of a finished phase: a brainstorming or finding stretch, or an implementation run whose todo list is complete. Compact the whole finished phase in one checkpoint, as the last action of your own turn after you have answered the human. Never compact in reply to a message of the human, never for a single step or a few tool calls, and never to get rid of one large tool result. A checkpoint must stay clearly smaller than the span it replaces, about one fifth or less; if it cannot, do not compact. Compress only a span whose information a summary fully covers for the rest of the conversation, and never compress the opening, the in-flight task, or the active instruction. Write the checkpoint for the next similar task: keep exact paths, commands, IDs, measured pitfalls, numbers, rejected approaches with the reason, and the human\'s decisions and preferences; drop only real noise. Expert sessions: if you work as a teammate in an Agent Team, you are the standing expert for your area and will be woken again later for similar tasks, so a finished topic is stock for the next one, not dead weight. For you, "a summary fully covers the span" also means it covers what a later, similar task would need: keep measured pitfalls, exact node, parameter and function names, commands verbatim, paths, intermediate results with their numbers, rejected approaches together with the reason, and the human\'s decisions and preferences. Drop only real noise, such as repeated failed attempts and bulky output without a finding. Write the checkpoint too detailed rather than too terse; the archive behind context_recall is the safety net, not a substitute for a good checkpoint, because you only recall what you notice is missing. Forked sessions: when this session was forked from another (a teammate or subagent created as a fork) or has forks of its own, the inherited history is a trunk shared with them, and the inference engine reuses its prompt cache only while that trunk stays byte-identical everywhere. Never compact a span inside that trunk with the default scope; when the trunk itself must shrink, call context_compact with scope "trunk", which compacts the whole inherited trunk into one shared checkpoint that every sibling reuses byte for byte. When a detail you need was compacted away, read it back with context_recall instead of guessing or redoing the work.',
+      text: 'Use the context_compact tool only at the end of a finished phase: a brainstorming or finding stretch, or an implementation run whose todo list is complete. Compact the whole finished phase in one checkpoint, as the last action of your own turn after you have answered the human. Never compact in reply to a message of the human, never for a single step or a few tool calls, and never to get rid of one large tool result. Lossless is mandatory: the checkpoint must carry every detail that will be needed afterwards, small details included — exact paths, commands, IDs, names, numbers, the human\'s decisions and wording. Nothing that served the work may be lost by the compaction; there is no size cap on the checkpoint, and a checkpoint that drops a detail to stay small is a failed compaction. Compress only a span whose information a summary fully covers for the rest of the conversation, and never compress the opening, the in-flight task, or the active instruction. Write the checkpoint for the next similar task: keep exact paths, commands, IDs, measured pitfalls, numbers, rejected approaches with the reason, and the human\'s decisions and preferences; drop only real noise. Expert sessions: if you work as a teammate in an Agent Team, you are the standing expert for your area and will be woken again later for similar tasks, so a finished topic is stock for the next one, not dead weight. For you, "a summary fully covers the span" also means it covers what a later, similar task would need: keep measured pitfalls, exact node, parameter and function names, commands verbatim, paths, intermediate results with their numbers, rejected approaches together with the reason, and the human\'s decisions and preferences. Drop only real noise, such as repeated failed attempts and bulky output without a finding. Write the checkpoint too detailed rather than too terse; the archive behind context_recall is the safety net, not a substitute for a good checkpoint, because you only recall what you notice is missing. Forked sessions: when this session was forked from another (a teammate or subagent created as a fork) or has forks of its own, the inherited history is a trunk shared with them, and the inference engine reuses its prompt cache only while that trunk stays byte-identical everywhere. Never compact a span inside that trunk with the default scope; when the trunk itself must shrink, call context_compact with scope "trunk", which compacts the whole inherited trunk into one shared checkpoint that every sibling reuses byte for byte. When a detail you need was compacted away, read it back with context_recall instead of guessing or redoing the work.',
     }))
   }
-
-  // 会话发生压缩（含自动引擎）时重置增长基线。
-  disposers.push(ctx.on('session/event', (session: SessionLike | undefined, event: SessionEventLike) => {
-    try {
-      if (!session || event.type !== 'compaction/summary') return
-      const tokens = occupancyTokensOf(session)
-      volumeBaseline.set(session, tokens ?? 0)
-    } catch (e) {
-      /* 忽略 */
-    }
-  }))
 
   // Shared trunk: learn which fork points each parent handed out, from the
   // children's own session headers (durable: the registry persists them).
@@ -386,8 +358,8 @@ export function apply(ctx: Context, config: Config) {
     // Marker fuer seinen Anfang — das Modell muss Worte zitieren, und die
     // Anfaenge der Harness-Meldungen sind vorgeschrieben, also trifft der
     // Zitat-Anker mehrere Knoten (AMBIGUOUS). Die Liste erscheint nur, wenn
-    // der Nudge feuert (alle volumeNudgeTokens Wachstum), 24 Zeilen kosten
-    // dafuer rund 400 Token — gegen 50k Wachstum billig.
+    // die harte Obergrenze feuert (Belegung >= contextHardLimitTokens), 24
+    // Zeilen kosten dafuer rund 400 Token — gegen ein 300k-Fenster billig.
     const MARKER_WINDOW = 24
     // Layer-Cake (2026-10-29): die Preis-Schätzung. Der Mensch hat entschieden,
     // dass das Modell den Preis in Token kennen muss, bevor es einen Schnitt in
@@ -438,9 +410,8 @@ export function apply(ctx: Context, config: Config) {
       order: 50,
       text: () => {
         try {
-          const threshold = config.volumeNudgeTokens
           const hardLimit = config.contextHardLimitTokens
-          if (!(threshold > 0) && !(hardLimit > 0)) return ''
+          if (!(hardLimit > 0)) return ''
           const agentsService = ctx.get('agents')
           const current = agentsService && typeof (agentsService as { currentInitiator?: unknown }).currentInitiator === 'function'
             ? (agentsService as { currentInitiator: () => unknown }).currentInitiator()
@@ -449,12 +420,13 @@ export function apply(ctx: Context, config: Config) {
           if (!agent || !agent.session) return ''
           const now = occupancyTokensOf(agent.session)
           if (now === null) return ''
-          const baseline = volumeBaseline.get(agent.session) ?? 0
-          const grown = now - baseline
-          const mode = nudgeMode(grown, threshold, now, hardLimit, todosOf(agent.session))
-          if (mode === null) return ''
+          // Der Phasenhinweis ist entfernt (Anordnung des Menschen 2026-10-30:
+          // „der phasenhinweis muss raus“). Die einzige Auslöser-Meldung ist die
+          // harte Obergrenze; das Modell verdichtet sonst aus der Regel im
+          // Werkzeugtext, am Ende einer abgeschlossenen Phase.
+          if (nudgeMode(now, hardLimit) !== 'limit') return ''
           const markers = markerLines(agent.session)
-          return (mode === 'limit' ? limitNudgeText(now) : phaseNudgeText(grown, todosOf(agent.session))) +
+          return limitNudgeText(now) +
             (markers ? '\n\nAnchor markers for the most recent messages, each with its cut price — using one as startAnchor or endAnchor names exactly one message and never fails (preferred over quoting text). The price is the tokens re-read if you cut at that marker; a lower price means a cheaper cut:\n' + markers : '')
         } catch (e) {
           return ''
@@ -473,12 +445,12 @@ export function apply(ctx: Context, config: Config) {
 
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span stays readable with context_recall, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: only at the end of a finished phase (a brainstorming or finding stretch, or an implementation run whose todo list is complete), the whole phase in one checkpoint, as the last action of your own turn — never as the reply to a message of the human and never for a single step. The scenes below describe what to write: ① Progress — a finished phase, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown bullets under ## sections, complete rather than terse; keep exact paths/commands/IDs and the user\'s requirements and direction. The checkpoint is also the human\'s scrollable marker in the chat: it opens with a real Markdown H1 heading `# 📌 ZWISCHENFAZIT — <three words naming what this phase was about>`, never a code block, never a smaller heading, and the word ZWISCHENFAZIT always spelled identically so it can be searched. Under the heading the first lines are the standing, the decision, and the handgrips that come next in the order the human performs them; a checkpoint that only reports is noise. Write it for the next similar task, not only for this one: keep measured pitfalls, exact names, numbers, rejected approaches with the reason and the human\'s decisions; a teammate or expert session errs on too detailed rather than too terse. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; checkpoint must be smaller than the compressed span; edges snap to balanced tool-call/result boundaries. A failed compaction keeps the checkpoint text you wrote: retry the same span WITHOUT summary to reuse it unchanged (write a new summary only to rewrite the text) — never rewrite a kept checkpoint from memory when the retry can take it back. Shared trunk: in a forked session (or one with forks of its own) the inherited history is shared with the other forks; a default-scope span may not start inside it. scope "trunk" compacts exactly that inherited trunk — no anchors, no summary — into one checkpoint that is generated once and reused byte for byte by every sibling, keeping the shared prompt cache intact. Choosing anchors (this is where most calls fail — read it before the first attempt): an anchor must be the VERBATIM opening of a message that is still on the surface, and it must fit exactly ONE message. Three rules, in order: (1) Anchor on TEXT YOU WROTE, not on text you remember thinking. Only the visible messages are on the surface; anything that stood solely in your reasoning is not, so it can never match. Quote the first words of a message exactly as they were written, including the opening punctuation. (2) Copy the opening, do not paraphrase it. "The list is done" does not match "Die Leseliste ist durchgearbeitet"; a reworded or translated anchor never matches, and neither does the middle of a message — only its beginning. (3) Make it unique. Openings repeat: several tool calls of the same tool, several messages beginning with "Ok", every checkpoint beginning the same way. If the opening is generic, extend it into the part that is unique to that one message — for a tool call quote the marker AND the first characters of its argument, e.g. `[tool-call Bash] {"command":"cd /repo && ls`; a marker without an argument names one of hundreds of calls and is rejected as ambiguous. If a call fails, the error names the reason and lists the last messages of the surface with copyable openings — copy one of those openings verbatim instead of retrying a variant of the same anchor. Do not retry the same anchor twice. LAYER-CAKE (the default for choosing WHERE to compact): lay a thick layer, then compact the backmost finished section into one thin checkpoint appended at the end; only the newest layer is ever touched, everything before it stays byte-identical and cache-valid. A cut in the middle re-reads every token after it (the price is the tokens after the cut, shown per marker in the reminder); a cut at the end re-reads only the tail, so prefer rare, big compactions of the backmost section over many small ones, and prefer a boundary at a 16384-token grid edge — the engine places cache checkpoints only there. A small span at the end has obvious, unique anchors and is much easier to get right.',
+    description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span stays readable with context_recall, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: only at the end of a finished phase (a brainstorming or finding stretch, or an implementation run whose todo list is complete), the whole phase in one checkpoint, as the last action of your own turn — never as the reply to a message of the human and never for a single step. The scenes below describe what to write: ① Progress — a finished phase, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown bullets under ## sections, complete rather than terse; keep exact paths/commands/IDs and the user\'s requirements and direction. The checkpoint is also the human\'s scrollable marker in the chat: it opens with a real Markdown H1 heading `# 📌 ZWISCHENFAZIT — <three words naming what this phase was about>`, never a code block, never a smaller heading, and the word ZWISCHENFAZIT always spelled identically so it can be searched. Under the heading the first lines are the standing, the decision, and the handgrips that come next in the order the human performs them; a checkpoint that only reports is noise. Write it for the next similar task, not only for this one: keep measured pitfalls, exact names, numbers, rejected approaches with the reason and the human\'s decisions; a teammate or expert session errs on too detailed rather than too terse. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; the checkpoint is lossless — it must carry every detail that will be needed afterwards, small details included, and there is no size cap on it; edges snap to balanced tool-call/result boundaries. A failed compaction keeps the checkpoint text you wrote: retry the same span WITHOUT summary to reuse it unchanged (write a new summary only to rewrite the text) — never rewrite a kept checkpoint from memory when the retry can take it back. Shared trunk: in a forked session (or one with forks of its own) the inherited history is shared with the other forks; a default-scope span may not start inside it. scope "trunk" compacts exactly that inherited trunk — no anchors, no summary — into one checkpoint that is generated once and reused byte for byte by every sibling, keeping the shared prompt cache intact. Choosing anchors (this is where most calls fail — read it before the first attempt): an anchor must be the VERBATIM opening of a message that is still on the surface, and it must fit exactly ONE message. Three rules, in order: (1) Anchor on TEXT YOU WROTE, not on text you remember thinking. Only the visible messages are on the surface; anything that stood solely in your reasoning is not, so it can never match. Quote the first words of a message exactly as they were written, including the opening punctuation. (2) Copy the opening, do not paraphrase it. "The list is done" does not match "Die Leseliste ist durchgearbeitet"; a reworded or translated anchor never matches, and neither does the middle of a message — only its beginning. (3) Make it unique. Openings repeat: several tool calls of the same tool, several messages beginning with "Ok", every checkpoint beginning the same way. If the opening is generic, extend it into the part that is unique to that one message — for a tool call quote the marker AND the first characters of its argument, e.g. `[tool-call Bash] {"command":"cd /repo && ls`; a marker without an argument names one of hundreds of calls and is rejected as ambiguous. If a call fails, the error names the reason and lists the last messages of the surface with copyable openings — copy one of those openings verbatim instead of retrying a variant of the same anchor. Do not retry the same anchor twice. LAYER-CAKE (the default for choosing WHERE to compact): lay a thick layer, then compact the backmost finished section into one thin checkpoint appended at the end; only the newest layer is ever touched, everything before it stays byte-identical and cache-valid. A cut in the middle re-reads every token after it (the price is the tokens after the cut, shown per marker in the reminder); a cut at the end re-reads only the tail, so prefer rare, big compactions of the backmost section over many small ones, and prefer a boundary at a 16384-token grid edge — the engine places cache checkpoints only there. A small span at the end has obvious, unique anchors and is much easier to get right.',
     parameters: {
       scope: { type: 'string', enum: ['span', 'trunk'], description: 'Optional. "span" (default) compacts the span between the anchors with your summary. "trunk" compacts the whole history this forked session shares with its siblings or forks into the shared checkpoint; startAnchor, endAnchor and summary are ignored.' },
       startAnchor: { type: 'string', description: 'Verbatim opening of the span\'s first message — or, PREFERRED, a marker id like `[a7730ed]` from the reminder\'s anchor-marker list: it names exactly one message and never fails. Otherwise see "Choosing anchors" in the description. Omit it only to rebaseline from the beginning; the span then starts after the system prompt.' },
       endAnchor: { type: 'string', description: 'Verbatim opening of the span\'s last message, or PREFERRED a marker id like `[a7730ed]` from the reminder\'s anchor-marker list. Required for scope "span". This node is replaced — pass its predecessor\'s marker to keep it.' },
-      summary: { type: 'string', description: 'Required for scope "span" on a fresh compaction. The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; must be smaller than the compressed content, but keep every detail a later similar task could need. After a failed compaction you may OMIT it to reuse the kept text of that failure unchanged (retried for the same span, or for the neighbour-anchored retry the AMBIGUOUS hint recommends); pass a new one to rewrite it.' },
+      summary: { type: 'string', description: 'Required for scope "span" on a fresh compaction. The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; lossless is mandatory — keep every detail a later similar task could need, small details included, with no size cap on the checkpoint. After a failed compaction you may OMIT it to reuse the kept text of that failure unchanged (retried for the same span, or for the neighbour-anchored retry the AMBIGUOUS hint recommends); pass a new one to rewrite it.' },
     },
     output: {
       // 显式声明真实字段（而非开放的 additionalProperties:true 空对象），
