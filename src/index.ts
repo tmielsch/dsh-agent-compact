@@ -733,29 +733,56 @@ export function apply(ctx: Context, config: Config) {
       // One shot: the patched summarize() appends the recall reference to this checkpoint.
       if (recallId) (optimized._acArchiveIds ??= {})[sid] = recallId
 
-      let result: CompactionResultLike
+      // `undefined` marks "not yet compacted"; the catch below either retries
+      // once (system-head case) or throws, so the read after the try block is
+      // always a real result — checked explicitly instead of non-null asserted.
+      let result: CompactionResultLike | undefined
       try {
         result = trunkPlan
           ? await runTrunkCompaction(optimized, agent, trunkPlan, exec.signal) as CompactionResultLike
           : await engine.compactRegion(startSeq, endSeq, agent, exec.signal)
       } catch (err) {
-        const msg = err && (err as Error).message ? (err as Error).message : String(err)
+        let msg = err && (err as Error).message ? (err as Error).message : String(err)
         // Never leave a one-shot summary behind for a later, unrelated compaction.
         const ext = (engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary
         if (ext) delete ext[sid]
-        // Den geschriebenen Checkpoint-Text behalten: der nächste Versuch darf
-        // ihn ohne summary unverändert wiederverwenden (./summary-stash.ts).
-        let kept = false
-        if (!trunkPlan && config.keepFailedSummary && summaryText) {
-          stash.save(sid, { text: summaryText, startAnchor: rawStartAnchor, endAnchor: rawEndAnchor, startSeq, endSeq })
-          kept = true
+        // Systemkopf-Falle (gemessen 2026-10-30): der Kern schützt Position 0,
+        // wenn sie die Systemnachricht trägt (`assertSystemHeadRewrite` in
+        // dsh-session), und lehnt jeden Schnitt ab, der dort beginnt. Beginnt
+        // die Spanne nach unserer Zählung nicht auf 0, der Kern sieht sie aber
+        // auf seiner eigenen Oberfläche so, dann ist die Antwort: den Start um
+        // einen Knoten verschieben und denselben Bereich noch einmal
+        // verdichten. Der Checkpoint-Text liegt bereit, es wird nichts neu
+        // geschrieben, und das Modell sieht die Meldung nie.
+        if (!trunkPlan && /node 0 holds the system prompt/.test(msg) && si === 0 && ei > si) {
+          si += 1
+          startSeq = nodes[si].seq
+          if (ext && summaryText) ext[sid] = summaryText
+          try {
+            result = await engine.compactRegion(startSeq, endSeq, agent, exec.signal)
+            msg = ''
+          } catch (err2) {
+            msg = err2 && (err2 as Error).message ? (err2 as Error).message : String(err2)
+            const ext2 = (engine as unknown as { _externalSummary?: Record<string, string> })._externalSummary
+            if (ext2) delete ext2[sid]
+          }
         }
-        throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg + (kept
-          ? '\nthe checkpoint text you wrote is kept; retry the same range without summary to reuse it unchanged (the raw span is still in the conversation; pass summary only to rewrite it)'
-          : ''))
+        if (msg) {
+          // Den geschriebenen Checkpoint-Text behalten: der nächste Versuch darf
+          // ihn ohne summary unverändert wiederverwenden (./summary-stash.ts).
+          let kept = false
+          if (!trunkPlan && config.keepFailedSummary && summaryText) {
+            stash.save(sid, { text: summaryText, startAnchor: rawStartAnchor, endAnchor: rawEndAnchor, startSeq, endSeq })
+            kept = true
+          }
+          throw new Error('compaction rejected range [' + startSeq + ',' + endSeq + ']: ' + msg + (kept
+            ? '\nthe checkpoint text you wrote is kept; retry the same range without summary to reuse it unchanged (the raw span is still in the conversation; pass summary only to rewrite it)'
+            : ''))
+        }
       } finally {
         if (optimized._acArchiveIds) delete optimized._acArchiveIds[sid]
       }
+      if (!result) throw new Error('compaction produced no result for range [' + startSeq + ',' + endSeq + ']')
       if (trunkPlan) {
         // Decide "reused" from the stored entry's origin: with concurrent siblings
         // a pre-check cannot tell who generated the text.
