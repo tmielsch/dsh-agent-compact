@@ -494,17 +494,100 @@ test('nodeSummaryLine: the candidate line carries the cut price', () => {
   assert.match(message, /cut price ≈ \d+ tokens/)
 })
 
-test('gebautes lib/index.js trägt die Endpunkt-Regel: endAnchor optional, Vorgabe letzter Knoten', async () => {
+test('gebautes lib/index.js trägt die Endpunkt-Regel: endAnchor optional, Vorgabe letzter ABGESCHLOSSENER Knoten', async () => {
   const { readFileSync } = await import('node:fs')
   const code = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
   assert.equal(code.includes('endAnchor may be OMITTED'), true)
-  assert.equal(code.includes('LAST node on the surface'), true)
+  assert.equal(code.includes('last FINISHED node on the surface'), true)
+  assert.equal(code.includes('not a balanced boundary'), true)
   assert.equal(code.includes('in-flight answer'), true)
   // Die alte Pflicht-Formulierung des ENDPUNKTS darf nicht zurückkehren. Der
   // summary-Feldtext sagt weiterhin "Required for scope" (summary ist Pflicht),
   // also prüfen wir den endAnchor-Beschreibungstext isoliert.
   const endDesc = code.slice(code.indexOf('endAnchor: { type'), code.indexOf('summary: { type'))
-  assert.match(endDesc, /OPTIONAL: omit it/)
+  assert.match(endDesc, /OPTIONAL and the SAFE default: omit it/)
   assert.equal(endDesc.includes('Required for scope'), false)
   assert.equal(code.includes('provide endAnchor'), false)
+})
+
+// ---- Der Standard-Endpunkt darf nie im offenen Schritt liegen (gemeldet 2026-10-30):
+// Ohne endAnchor war der letzte Knoten der eigene, noch unbeantwortete
+// context_compact-Aufruf; der Kern lehnt ihn ab ("not a balanced boundary").
+// Wer der Werkzeugbeschreibung folgte und den Endpunkt wegliess, scheiterte jedes Mal. ----
+
+test('resolveBoundaries: omitted endAnchor stops BEFORE the own open tool call', () => {
+  const nodes = [
+    userNode(1, 'hello'),
+    assistantTextNode(2, 'hi back'),
+    userNode(3, 'next task'),
+    assistantToolCallNode(4, 'own-call', 'context_compact', '{"startAnchor":"hello"}'),
+  ]
+  const b = resolveBoundaries(nodes, { startAnchor: 'hello' })
+  assert.equal(b.startSeq, 1)
+  assert.equal(b.endSeq, 3)
+  assert.equal(b.method, 'start=anchor + end=last-finished')
+})
+
+test('resolveBoundaries: omitted endAnchor keeps finished tool pairs and drops only the open call', () => {
+  const nodes = [
+    userNode(1, 'hello'),
+    assistantToolCallNode(2, 'c1', 'bash', '{}'),
+    toolResultNode(3, 'ok', false, 'c1'),
+    assistantTextNode(4, 'done with the step'),
+    assistantToolCallNode(5, 'own-call', 'context_compact', '{}'),
+  ]
+  const b = resolveBoundaries(nodes, {})
+  assert.equal(b.endSeq, 4)
+})
+
+test('resolveBoundaries: omitted endAnchor with parallel calls, one answered, one open, stops before that message', () => {
+  const nodes = [
+    userNode(1, 'hello'),
+    assistantTextNode(2, 'finished text'),
+    assistantMultiToolCallNode(3, ['a', 'b']),
+    toolResultNode(4, 'ra', false, 'a'),
+  ]
+  const b = resolveBoundaries(nodes, {})
+  assert.equal(b.endSeq, 2)
+})
+
+test('resolveBoundaries: omitted endAnchor with nothing finished says so instead of a balance error', () => {
+  const nodes = [systemNode(0, 'system prompt'), assistantToolCallNode(1, 'own-call', 'context_compact', '{}')]
+  assert.throws(() => resolveBoundaries(nodes, {}), /nothing finished to compact/)
+})
+
+test('resolveBoundaries: an explicit endAnchor inside an open step gets a plain sentence, not the host balance error', () => {
+  // Zwei parallele Aufrufe, erst einer beantwortet: der Schritt ist noch offen,
+  // der Knoten aber nicht der letzte (der letzte waere schon als Anker gesperrt).
+  const nodes = [
+    userNode(1, 'hello'),
+    {
+      seq: 2,
+      type: 'assistant/message',
+      data: {
+        message: {
+          content: [
+            { type: 'text', text: 'working on the step' },
+            { type: 'tool-call', id: 'a', name: 'bash', arguments: '{}' },
+            { type: 'tool-call', id: 'b', name: 'bash', arguments: '{}' },
+          ],
+        },
+      },
+    },
+    toolResultNode(3, 'result a', false, 'a'),
+  ]
+  assert.throws(
+    () => resolveBoundaries(nodes, { startAnchor: 'hello', endAnchor: 'working on the step' }),
+    /lies inside a step that is still open/,
+  )
+})
+
+test('resolveBoundaries: an explicit endAnchor on a finished message before the open step still works', () => {
+  const nodes = [
+    userNode(1, 'hello'),
+    assistantTextNode(2, 'finished text'),
+    assistantToolCallNode(3, 'own-call', 'context_compact', '{}'),
+  ]
+  const b = resolveBoundaries(nodes, { startAnchor: 'hello', endAnchor: 'finished text' })
+  assert.equal(b.endSeq, 2)
 })
