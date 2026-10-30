@@ -591,3 +591,19 @@ test('resolveBoundaries: an explicit endAnchor on a finished message before the 
   const b = resolveBoundaries(nodes, { startAnchor: 'hello', endAnchor: 'finished text' })
   assert.equal(b.endSeq, 2)
 })
+
+test('gebautes lib/index.js trägt den Wiederholungsschritt für die Systemkopf-Falle', async () => {
+  const { readFileSync } = await import('node:fs')
+  const code = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+  // Der Kern lehnt einen Schnitt ab, der auf Position 0 beginnt ("node 0 holds
+  // the system prompt"). Das Plugin verschiebt den Start dann um eins und
+  // verdichtet denselben Bereich noch einmal, ohne den Checkpoint neu schreiben
+  // zu lassen — gemessen 2026-10-30, als eine Verdichtung mit dieser Meldung
+  // scheiterte. Ohne den Wiederholungsschritt bliebe die Meldung beim Modell.
+  assert.equal(code.includes('node 0 holds the system prompt'), true)
+  assert.equal(code.includes('si += 1'), true)
+  // Der Start darf NICHT pauschal auf 1 geklemmt werden: bei einer Sitzung ohne
+  // Systemkopf ist Position 0 die erste echte Nachricht, und ein Sprung dorthin
+  // würde Inhalt verlieren (zwei Tests haben das 2026-10-30 bewiesen).
+  assert.equal(code.includes('Math.max(head, 1)'), false)
+})

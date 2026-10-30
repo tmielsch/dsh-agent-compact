@@ -382,6 +382,12 @@ export function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: un
     si = resolveUniqueHit(nodes, startAnchor, 'startAnchor')
     method.push('start=anchor')
   } else {
+    // Ohne Startanker beginnt die Spanne nach dem Systemkopf. Steht dort keine
+    // Systemnachricht, ist das die erste Nachricht des Austauschs — bewusst so,
+    // sonst ginge Inhalt verloren. Der Fall "der Kern sieht Position 0 als
+    // Systemprompt, wir nicht" wird eine Ebene höher abgefangen: der Aufruf
+    // wird einmal mit um eins verschobenem Start wiederholt, sobald der Kern
+    // die Meldung "node 0 holds the system prompt" schickt (src/index.ts).
     si = head
     method.push(head > 0 ? 'start=after-system' : 'start=first')
   }
