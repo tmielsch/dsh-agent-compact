@@ -53,7 +53,7 @@ export const compaction$schema = z.object({
   // the client bundle is, so there is an update window between the two ends.
   checkpointChars: z.number().readonly().optional(),
   checkpointTokensEstimate: z.number().readonly().optional(),
-  writeDurationSeconds: z.union([z.number(), z.null()]).readonly().optional(),
+  writeDurationSeconds: z.union([z.number(), z.literal(null)]).readonly().optional(),
 })
 
 export const compactions_result$schema = z.object({
