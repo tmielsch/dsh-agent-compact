@@ -288,6 +288,29 @@ export function resolveUniqueHit(nodes: SurfaceNode[], anchor: string, side: str
   )
 }
 
+/**
+ * For each node: is the cut right after it free of unanswered tool calls?
+ * Same counting as the host's tool-pairing balance (an assistant message adds
+ * its tool-call blocks, a tool/result takes one away), so a span that ends on a
+ * `true` entry is never rejected as "not a balanced boundary".
+ */
+export function balancedAfterEach(nodes: SurfaceNode[]): boolean[] {
+  const out: boolean[] = []
+  let open = 0
+  for (const n of nodes) {
+    if (n.type === 'assistant/message') {
+      const content = (n.data as { message?: { content?: unknown } } | undefined)?.message?.content
+      if (Array.isArray(content)) {
+        open += content.filter((b) => b !== null && typeof b === 'object' && (b as { type?: unknown }).type === 'tool-call').length
+      }
+    } else if (n.type === 'tool/result') {
+      open = Math.max(0, open - 1)
+    }
+    out.push(open === 0)
+  }
+  return out
+}
+
 export function snapStartBalanced(nodes: SurfaceNode[], si: number): number {
   // tool/result 不能在没有其 assistant 消息的情况下作为区间开头：
   // 向前回退到最近的、发起这些调用的 assistant/message。
@@ -367,8 +390,19 @@ export function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: un
     ei = resolveUniqueHit(nodes, endAnchor, 'endAnchor')
     method.push('end=anchor')
   } else {
+    // Der letzte Knoten der Oberflaeche ist beim eigenen Aufruf der noch
+    // unbeantwortete context_compact-Aufruf: ein Schnitt dahinter liegt im
+    // offenen Schritt, und der Kern lehnt ihn ab. Wer der Beschreibung folgt
+    // und den Endpunkt weglaesst, bekommt deshalb das Ende des letzten
+    // abgeschlossenen Knotens davor (gemeldet 2026-10-30: jeder Versuch ohne
+    // endAnchor scheiterte, kleinere Modelle brauchten mehrere Anlaeufe).
+    const balanced = balancedAfterEach(nodes)
     ei = nodes.length - 1
-    method.push('end=last-node')
+    while (ei >= 0 && !balanced[ei]) ei--
+    if (ei < 0 || ei < si) {
+      throw new Error('there is nothing finished to compact yet: every node after the start belongs to a step that is still open (its tool calls have no result yet, your own context_compact call included). Wait until a step has finished, or choose a startAnchor earlier on the surface.')
+    }
+    method.push(ei === nodes.length - 1 ? 'end=last-node' : 'end=last-finished')
   }
   if (si > ei) {
     throw new Error('resolved start sits after resolved end on the surface (start pos ' + si + ', end pos ' + ei + ')')
@@ -379,6 +413,12 @@ export function resolveBoundaries(nodes: SurfaceNode[], args: { startAnchor?: un
   if (snappedEnd !== ei) method.push('end-snapped')
   si = snappedStart
   ei = snappedEnd
+  // Ein Endpunkt mitten im offenen Schritt (Aufruf ohne Ergebnis) wuerde vom
+  // Kern mit "not a balanced boundary" abgelehnt. Statt dessen hier sagen, was
+  // zu tun ist: der geschriebene Checkpoint-Text bleibt erhalten.
+  if (!balancedAfterEach(nodes)[ei]) {
+    throw new Error('the end of the span (seq ' + nodes[ei].seq + ') lies inside a step that is still open: its tool calls have no result yet, your own context_compact call included. Pick an endAnchor on a message BEFORE that step, or omit endAnchor: the span then ends at the last finished node by itself.')
+  }
   if (si > ei) throw new Error('after balancing, start sits after end on the surface (start pos ' + si + ', end pos ' + ei + ')')
   return {
     si,
