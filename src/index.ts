@@ -14,7 +14,7 @@ import { createShadowUserMessage } from './shadow-message.js'
 import { effectiveCut, patchEngine, planTrunk, runTrunkCompaction } from './optimizer.js'
 import { normText } from './normalize.js'
 import { CtxSurfaceService } from './ctx-surface.js'
-import { prefixHits, resolveBoundaries, soleToolCall, spanText, tailCutPrice } from './boundary.js'
+import { balancedAfterEach, prefixHits, resolveBoundaries, soleToolCall, spanText, tailCutPrice } from './boundary.js'
 import { markerTag } from './anchor.js'
 import { limitNudgeText, nudgeMode } from './phase.js'
 import { nodeFlatText } from './surface-text.js'
@@ -22,6 +22,7 @@ import { ForkRegistry, SharedTrunkMemo } from './memo.js'
 import { forkCut, forkParent, lockedSpanError, surfaceEvents } from './trunk.js'
 import { DEFAULT_MAX_CHARS, MAX_CHARS, TrunkArchive, referencedIds, renderRecall, spanArchiveId, splitBlocks, trunkRecallId } from './recall.js'
 import { SummaryStash, keptLabel, type KeptSummary } from './summary-stash.js'
+import { buildTurnTable, planRows, turnCutRow, turnTableText, type TurnLogEvent, type TurnTable } from './turns.js'
 import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode, TrunkDeps } from './optimizer.js'
 import type { TrunkSessionLike } from './trunk.js'
 
@@ -35,6 +36,7 @@ export interface Config {
   sharedStoreDir: string
   trunkGuard: boolean
   keepFailedSummary: boolean
+  keepTurns: number
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -43,6 +45,7 @@ export const Config: Schema<Config> = Schema.object({
   contextHardLimitTokens: Schema.number().default(300000).description('Upper bound: when the context occupancy reaches this many tokens, the hint appears. Set to 0 to disable. This is the only trigger message the plugin sends; the phase hint was removed on 2026-10-30 by the human\'s order ("der phasenhinweis muss raus"), because a hint that fires on growth pushed the session into compactions it did not need.'),
   sharedStoreDir: Schema.string().default('').description('Directory for the shared-trunk memo (content-addressed trunk checkpoints) and the fork registry. Empty keeps both in memory only, so they do not survive a restart.'),
   trunkGuard: Schema.boolean().default(true).description('Guard automatic compaction in forked sessions (and in parents with known forks): a range reaching into the inherited trunk becomes the shared trunk compaction, or is clamped to start after it.'),
+  keepTurns: Schema.number().default(3).description('Working-memory window: the newest N finished turns are never part of a turn-based compaction. The human\'s order (2026-10-30): "Wir haben 10 Turns, 3 oder 4 dürfen maximal" — compact everything older than this window, in one checkpoint per stretch.'),
 })
 
 export function apply(ctx: Context, config: Config) {
@@ -221,6 +224,54 @@ export function apply(ctx: Context, config: Config) {
     return snap && Array.isArray(snap.events) ? (snap.events as SurfaceNode[]) : []
   }
 
+  // Turn-basierte Schnitt-Planung (Anordnung des Menschen 2026-10-30). Der gemessene
+  // Schaden: "kompaktiere aggressiv, mindestens 300.000 Token" kam jedes Mal als
+  // 10.000 Token zurück, und das Modell behauptete danach, 300.000 gespart zu haben.
+  // Der Grund ist nicht das Werkzeug, sondern die Messbarkeit — die Token-Distanz
+  // zwischen zwei Anker-Markern steht an keiner Stelle, die das Modell lesen kann,
+  // also rät es und greift den letzten kleinen Brocken. Diese Zählung nach Zügen
+  // macht die Größe jeder möglichen Verdichtung lesbar, und die Werkzeug-Antwort
+  // nennt die frei gewordenen Token aus dem Kern, nicht aus dem Modellmund.
+  interface MeterNodeLike { seq?: unknown; tokens?: unknown }
+  interface TokenMeterFullLike { measure(session: SessionLike): { nodes?: readonly MeterNodeLike[] } | null | undefined }
+
+  /** The turn table of a live session, read synchronously (the nudge provider must be sync). */
+  function turnTableOf(session: SessionLike & TrunkSessionLike): TurnTable | null {
+    const nodes = surfaceEvents(session)
+    if (!nodes.length) return null
+    const tokensBySeq = new Map<number, number>()
+    const meter = ctx.get('tokenMeter') as TokenMeterFullLike | undefined
+    if (meter && typeof meter.measure === 'function') {
+      try {
+        const m = meter.measure(session)
+        const list = m && Array.isArray(m.nodes) ? m.nodes : []
+        for (const n of list) {
+          if (typeof n.seq === 'number' && typeof n.tokens === 'number') tokensBySeq.set(n.seq, n.tokens)
+        }
+      } catch (e) {
+        /* sizes stay absent: rows report 0 tokens and the tool says so */
+      }
+    }
+    const logEvents: TurnLogEvent[] = []
+    if (typeof session.snapshotEvents === 'function') {
+      try {
+        for (const ev of session.snapshotEvents()) {
+          if (ev && (ev.type === 'turn/start' || ev.type === 'turn/end')) logEvents.push({ seq: ev.seq, type: ev.type, data: ev.data })
+        }
+      } catch (e) {
+        /* no log access: the table stays empty and the tool reports that */
+      }
+    }
+    return buildTurnTable(logEvents, nodes.map((n) => ({ seq: n.seq, type: String(n.type ?? '') })), tokensBySeq)
+  }
+
+  /** The working-memory window: newest finished turns a compaction must not touch. */
+  function keepTurnsOf(override?: unknown): number {
+    if (typeof override === 'number' && Number.isFinite(override)) return Math.max(0, Math.floor(override))
+    const n = typeof config.keepTurns === 'number' && Number.isFinite(config.keepTurns) ? config.keepTurns : 3
+    return Math.max(0, Math.floor(n))
+  }
+
   // 按会话顺序编号的归档：从会话 spill 目录已有的最大数字后缀推导下一个编号；
   // 无 `root` 字段的后端降级为内存计数器。
   const archiveCounters = new Map<string, number>()
@@ -298,7 +349,7 @@ export function apply(ctx: Context, config: Config) {
     disposers.push(systemPrompt.section({
       name: 'tool:context_compact',
       order: 118,
-      text: 'Use the context_compact tool only at the end of a finished phase: a brainstorming or finding stretch, or an implementation run whose todo list is complete. Compact the whole finished phase in one checkpoint, as the last action of your own turn after you have answered the human. Never compact in reply to a message of the human, never for a single step or a few tool calls, and never to get rid of one large tool result. Lossless is mandatory: the checkpoint must carry every detail that will be needed afterwards, small details included — exact paths, commands, IDs, names, numbers, the human\'s decisions and wording. Nothing that served the work may be lost by the compaction; there is no size cap on the checkpoint, and a checkpoint that drops a detail to stay small is a failed compaction. Compress only a span whose information a summary fully covers for the rest of the conversation, and never compress the opening, the in-flight task, or the active instruction. Write the checkpoint for the next similar task: keep exact paths, commands, IDs, measured pitfalls, numbers, rejected approaches with the reason, and the human\'s decisions and preferences; drop only real noise. Expert sessions: if you work as a teammate in an Agent Team, you are the standing expert for your area and will be woken again later for similar tasks, so a finished topic is stock for the next one, not dead weight. For you, "a summary fully covers the span" also means it covers what a later, similar task would need: keep measured pitfalls, exact node, parameter and function names, commands verbatim, paths, intermediate results with their numbers, rejected approaches together with the reason, and the human\'s decisions and preferences. Drop only real noise, such as repeated failed attempts and bulky output without a finding. Write the checkpoint too detailed rather than too terse; the archive behind context_recall is the safety net, not a substitute for a good checkpoint, because you only recall what you notice is missing. Forked sessions: when this session was forked from another (a teammate or subagent created as a fork) or has forks of its own, the inherited history is a trunk shared with them, and the inference engine reuses its prompt cache only while that trunk stays byte-identical everywhere. Never compact a span inside that trunk with the default scope; when the trunk itself must shrink, call context_compact with scope "trunk", which compacts the whole inherited trunk into one shared checkpoint that every sibling reuses byte for byte. When a detail you need was compacted away, read it back with context_recall instead of guessing or redoing the work.',
+      text: 'Use the context_compact tool only at the end of a finished phase: a brainstorming or finding stretch, or an implementation run whose todo list is complete. Compact the whole finished phase in one checkpoint, as the last action of your own turn after you have answered the human. Never compact in reply to a message of the human, never for a single step or a few tool calls, and never to get rid of one large tool result. Lossless is mandatory: the checkpoint must carry every detail that will be needed afterwards, small details included — exact paths, commands, IDs, names, numbers, the human\'s decisions and wording. Nothing that served the work may be lost by the compaction; there is no size cap on the checkpoint, and a checkpoint that drops a detail to stay small is a failed compaction. Compress only a span whose information a summary fully covers for the rest of the conversation, and never compress the opening, the in-flight task, or the active instruction. Write the checkpoint for the next similar task: keep exact paths, commands, IDs, measured pitfalls, numbers, rejected approaches with the reason, and the human\'s decisions and preferences; drop only real noise. Expert sessions: if you work as a teammate in an Agent Team, you are the standing expert for your area and will be woken again later for similar tasks, so a finished topic is stock for the next one, not dead weight. For you, "a summary fully covers the span" also means it covers what a later, similar task would need: keep measured pitfalls, exact node, parameter and function names, commands verbatim, paths, intermediate results with their numbers, rejected approaches together with the reason, and the human\'s decisions and preferences. Drop only real noise, such as repeated failed attempts and bulky output without a finding. Write the checkpoint too detailed rather than too terse; the archive behind context_recall is the safety net, not a substitute for a good checkpoint, because you only recall what you notice is missing. Forked sessions: when this session was forked from another (a teammate or subagent created as a fork) or has forks of its own, the inherited history is a trunk shared with them, and the inference engine reuses its prompt cache only while that trunk stays byte-identical everywhere. Never compact a span inside that trunk with the default scope; when the trunk itself must shrink, call context_compact with scope "trunk", which compacts the whole inherited trunk into one shared checkpoint that every sibling reuses byte for byte. When a detail you need was compacted away, read it back with context_recall instead of guessing or redoing the work. Measuring before cutting is not optional: call context_compact_plan to see the session\'s finished turns and the token size of every candidate span, then compact with `turns=N` for a bulk cut that folds several finished scenes into one checkpoint (the human\'s order 2026-10-30: bundle scenes in one rutsch, stay incremental, never stop at the last small block). The newest finished turns inside the working-memory window are never touched. The result carries `freedTokens` measured by the engine — report that number and never a bigger saving you estimated.',
     }))
   }
 
@@ -426,7 +477,17 @@ export function apply(ctx: Context, config: Config) {
           // Werkzeugtext, am Ende einer abgeschlossenen Phase.
           if (nudgeMode(now, hardLimit) !== 'limit') return ''
           const markers = markerLines(agent.session)
-          return limitNudgeText(now) +
+          // Turn-basierte Größe (Anordnung des Menschen 2026-10-30): die harte
+          // Obergrenze nennt die größte sichere Bündel-Verdichtung in Token, damit
+          // das Modell nicht rät und den letzten 10.000-Token-Brocken nimmt.
+          const table = turnTableOf(agent.session as SessionLike & TrunkSessionLike)
+          const rows = table ? planRows(table, keepTurnsOf(), 3) : []
+          const bulk = rows.length
+            ? '\n\nBulk compaction by turns — the sizes are measured, not guessed. The newest ' + keepTurnsOf() + ' finished turn(s) stay untouched:\n' +
+              rows.map((r) => 'turns=' + r.k + ': frees ~' + r.grossTokens + ' tokens (' + r.nodes + ' nodes), cut price ~' + r.priceTokens + ' tokens').join('\n') +
+              '\nCall context_compact with turns=' + rows[0].k + ' and your summary; call context_compact_plan for the markers.'
+            : ''
+          return limitNudgeText(now) + bulk +
             (markers ? '\n\nAnchor markers for the most recent messages, each with its cut price — using one as startAnchor or endAnchor names exactly one message and never fails (preferred over quoting text). The price is the tokens re-read if you cut at that marker; a lower price means a cheaper cut:\n' + markers : '')
         } catch (e) {
           return ''
@@ -445,12 +506,14 @@ export function apply(ctx: Context, config: Config) {
 
   disposers.push(tools.register(defineTool({
     name: 'context_compact',
-    description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span stays readable with context_recall, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: only at the end of a finished phase (a brainstorming or finding stretch, or an implementation run whose todo list is complete), the whole phase in one checkpoint, as the last action of your own turn — never as the reply to a message of the human and never for a single step. The scenes below describe what to write: ① Progress — a finished phase, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown bullets under ## sections, complete rather than terse; keep exact paths/commands/IDs and the user\'s requirements and direction. The checkpoint is also the human\'s scrollable marker in the chat: it opens with a real Markdown H1 heading `# 📌 ZWISCHENFAZIT — <three words naming what this phase was about>`, never a code block, never a smaller heading, and the word ZWISCHENFAZIT always spelled identically so it can be searched. Under the heading the first lines are the standing, the decision, and the handgrips that come next in the order the human performs them; a checkpoint that only reports is noise. Write it for the next similar task, not only for this one: keep measured pitfalls, exact names, numbers, rejected approaches with the reason and the human\'s decisions; a teammate or expert session errs on too detailed rather than too terse. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; the checkpoint is lossless — it must carry every detail that will be needed afterwards, small details included, and there is no size cap on it; edges snap to balanced tool-call/result boundaries. A failed compaction keeps the checkpoint text you wrote: retry the same span WITHOUT summary to reuse it unchanged (write a new summary only to rewrite the text) — never rewrite a kept checkpoint from memory when the retry can take it back. Shared trunk: in a forked session (or one with forks of its own) the inherited history is shared with the other forks; a default-scope span may not start inside it. scope "trunk" compacts exactly that inherited trunk — no anchors, no summary — into one checkpoint that is generated once and reused byte for byte by every sibling, keeping the shared prompt cache intact. Choosing anchors (this is where most calls fail — read it before the first attempt): an anchor must be the VERBATIM opening of a message that is still on the surface, and it must fit exactly ONE message. Three rules, in order: (1) Anchor on TEXT YOU WROTE, not on text you remember thinking. Only the visible messages are on the surface; anything that stood solely in your reasoning is not, so it can never match. Quote the first words of a message exactly as they were written, including the opening punctuation. (2) Copy the opening, do not paraphrase it. "The list is done" does not match "Die Leseliste ist durchgearbeitet"; a reworded or translated anchor never matches, and neither does the middle of a message — only its beginning. (3) Make it unique. Openings repeat: several tool calls of the same tool, several messages beginning with "Ok", every checkpoint beginning the same way. If the opening is generic, extend it into the part that is unique to that one message — for a tool call quote the marker AND the first characters of its argument, e.g. `[tool-call Bash] {"command":"cd /repo && ls`; a marker without an argument names one of hundreds of calls and is rejected as ambiguous. If a call fails, the error names the reason and lists the last messages of the surface with copyable openings — copy one of those openings verbatim instead of retrying a variant of the same anchor. Do not retry the same anchor twice. LAYER-CAKE (the default for choosing WHERE to compact): lay a thick layer, then compact the backmost finished section into one thin checkpoint appended at the end; only the newest layer is ever touched, everything before it stays byte-identical and cache-valid. A cut in the middle re-reads every token after it (the price is the tokens after the cut, shown per marker in the reminder); a cut at the end re-reads only the tail, so prefer rare, big compactions of the backmost section over many small ones, and prefer a boundary at a 16384-token grid edge — the engine places cache checkpoints only there. A small span at the end has obvious, unique anchors and is much easier to get right. The endAnchor may be OMITTED: the span then ends at the LAST node on the surface, which is exactly the Layer-Cake cut, so a single start marker is enough. Never anchor the end on your own in-flight answer — the turn you are writing is not on the surface, so such an anchor can never be found; omit the endAnchor instead.',
+    description: 'Compress a past conversation span into one Markdown checkpoint you write; the raw span stays readable with context_recall, the compaction recorded. Anchor matching: anchors match the opening text of a message body (user/assistant messages only; tool-call blocks, tool results, and other transcript structure excluded). Whitespace, tool-call markers, and full/half-width punctuation differences are ignored; each anchor must match exactly one user or assistant message. When to compact: only at the end of a finished phase (a brainstorming or finding stretch, or an implementation run whose todo list is complete), the whole phase in one checkpoint, as the last action of your own turn — never as the reply to a message of the human and never for a single step. The scenes below describe what to write: ① Progress — a finished phase, keeping the active instruction and remaining steps live; ② Course correction — compact the failed span into a checkpoint recording what went wrong and the corrected direction, instead of carrying noise forward; ③ Rebaseline — stale opening requirements: compact the start too, restating current intent and what survives. Checkpoint: Markdown bullets under ## sections, complete rather than terse; keep exact paths/commands/IDs and the user\'s requirements and direction. The checkpoint is also the human\'s scrollable marker in the chat: it opens with a real Markdown H1 heading `# 📌 ZWISCHENFAZIT — <three words naming what this phase was about>`, never a code block, never a smaller heading, and the word ZWISCHENFAZIT always spelled identically so it can be searched. Under the heading the first lines are the standing, the decision, and the handgrips that come next in the order the human performs them; a checkpoint that only reports is noise. Write it for the next similar task, not only for this one: keep measured pitfalls, exact names, numbers, rejected approaches with the reason and the human\'s decisions; a teammate or expert session errs on too detailed rather than too terse. Per scene — Progress: Primary Request and Intent / Key Technical Concepts / Files and Code / Errors and Fixes / Current Work / Next Step; Correction: what went wrong / root cause / fix / next; Rebaseline: current intent / surviving decisions / plan ahead. Constraints: one compaction per session at a time; the checkpoint is lossless — it must carry every detail that will be needed afterwards, small details included, and there is no size cap on it; edges snap to balanced tool-call/result boundaries. A failed compaction keeps the checkpoint text you wrote: retry the same span WITHOUT summary to reuse it unchanged (write a new summary only to rewrite the text) — never rewrite a kept checkpoint from memory when the retry can take it back. Shared trunk: in a forked session (or one with forks of its own) the inherited history is shared with the other forks; a default-scope span may not start inside it. scope "trunk" compacts exactly that inherited trunk — no anchors, no summary — into one checkpoint that is generated once and reused byte for byte by every sibling, keeping the shared prompt cache intact. Choosing anchors (this is where most calls fail — read it before the first attempt): an anchor must be the VERBATIM opening of a message that is still on the surface, and it must fit exactly ONE message. Three rules, in order: (1) Anchor on TEXT YOU WROTE, not on text you remember thinking. Only the visible messages are on the surface; anything that stood solely in your reasoning is not, so it can never match. Quote the first words of a message exactly as they were written, including the opening punctuation. (2) Copy the opening, do not paraphrase it. "The list is done" does not match "Die Leseliste ist durchgearbeitet"; a reworded or translated anchor never matches, and neither does the middle of a message — only its beginning. (3) Make it unique. Openings repeat: several tool calls of the same tool, several messages beginning with "Ok", every checkpoint beginning the same way. If the opening is generic, extend it into the part that is unique to that one message — for a tool call quote the marker AND the first characters of its argument, e.g. `[tool-call Bash] {"command":"cd /repo && ls`; a marker without an argument names one of hundreds of calls and is rejected as ambiguous. If a call fails, the error names the reason and lists the last messages of the surface with copyable openings — copy one of those openings verbatim instead of retrying a variant of the same anchor. Do not retry the same anchor twice. LAYER-CAKE (the default for choosing WHERE to compact): lay a thick layer, then compact the backmost finished section into one thin checkpoint appended at the end; only the newest layer is ever touched, everything before it stays byte-identical and cache-valid. A cut in the middle re-reads every token after it (the price is the tokens after the cut, shown per marker in the reminder); a cut at the end re-reads only the tail, so prefer rare, big compactions of the backmost section over many small ones, and prefer a boundary at a 16384-token grid edge — the engine places cache checkpoints only there. A small span at the end has obvious, unique anchors and is much easier to get right. The endAnchor may be OMITTED: the span then ends at the LAST node on the surface, which is exactly the Layer-Cake cut, so a single start marker is enough. Never anchor the end on your own in-flight answer — the turn you are writing is not on the surface, so such an anchor can never be found; omit the endAnchor instead. BULK COMPACT BY TURNS (the way to reach a large saving): call context_compact_plan first — it measures the session by finished turns and lists each candidate span with its size in tokens; then pass `turns=N` plus your summary, and the span comes from that measurement, not from quoted openings. A bulk compaction folds several finished scenes into ONE checkpoint (bundling scenes is the point), and the newest finished turns inside the working-memory window stay untouched. MEASURED, NOT CLAIMED: the result carries `freedTokens` counted by the engine; report that number. Saying you saved 300k tokens after a 10k cut is a fabrication — the human sees the measured number.',
     parameters: {
       scope: { type: 'string', enum: ['span', 'trunk'], description: 'Optional. "span" (default) compacts the span between the anchors with your summary. "trunk" compacts the whole history this forked session shares with its siblings or forks into the shared checkpoint; startAnchor, endAnchor and summary are ignored.' },
       startAnchor: { type: 'string', description: 'Verbatim opening of the span\'s first message — or, PREFERRED, a marker id like `[a7730ed]` from the reminder\'s anchor-marker list: it names exactly one message and never fails. Otherwise see "Choosing anchors" in the description. Omit it only to rebaseline from the beginning; the span then starts after the system prompt.' },
       endAnchor: { type: 'string', description: 'Verbatim opening of the span\'s last message, or PREFERRED a marker id like `[a7730ed]` from the reminder\'s anchor-marker list. OPTIONAL and the SAFE default: omit it and the span ends at the last FINISHED node on the surface (everything before your own, still unanswered context_compact call), which is the Layer-Cake cut. An endAnchor on a node inside a step that is still open is rejected as "not a balanced boundary"; omitting it never is. Never anchor the end on your own in-flight answer — the current turn is not on the surface, so such an anchor can never match; omit the endAnchor instead. This node is replaced — pass its predecessor\'s marker to keep it.' },
       summary: { type: 'string', description: 'Required for scope "span" on a fresh compaction. The full Markdown checkpoint replacing the span, written by you from the conversation; never verbatim. Per-scene structure as in the description; lossless is mandatory — keep every detail a later similar task could need, small details included, with no size cap on the checkpoint. After a failed compaction you may OMIT it to reuse the kept text of that failure unchanged (retried for the same span, or for the neighbour-anchored retry the AMBIGUOUS hint recommends); pass a new one to rewrite it.' },
+      turns: { type: 'number', description: 'BULK COMPACT (the way to reach a large token saving): fold the oldest `turns` finished turns into ONE checkpoint, as counted by context_compact_plan. Use this instead of startAnchor/endAnchor for a bulk cut — the plan tool names the exact number and its size in tokens. The newest finished turns inside the working-memory window are never included. Pass summary together with it.' },
+      keep_turns: { type: 'number', description: 'Optional override of the working-memory window (newest finished turns that must stay untouched) for this call. Defaults to the profile setting (3).' },
     },
     output: {
       // 显式声明真实字段（而非开放的 additionalProperties:true 空对象），
@@ -488,6 +551,8 @@ export function apply(ctx: Context, config: Config) {
           recall: { type: 'string', description: 'Archive id of the compacted original, for context_recall.' },
           reused: { type: 'boolean', description: 'Present and true when summary was omitted and the kept text of the previous failure was reused.' },
           kept: { type: 'boolean', description: 'Present and true when this call failed and its checkpoint text was kept for the retry (omit summary on the retry to reuse it).' },
+          freedTokens: { type: 'number', description: 'The MEASURED tokens this compaction freed, counted by the engine over the shadowed nodes. Report this number, never your own estimate; a claim of a larger saving is a fabrication.' },
+          bulkTurns: { type: 'number', description: 'Present for a turns=N bulk compaction: the number of finished turns folded into this one checkpoint.' },
         },
       },
       render(args, value) { return [{ type: 'text', text: JSON.stringify(value) }] },
@@ -516,6 +581,9 @@ export function apply(ctx: Context, config: Config) {
       let endSeq = -1
       let trunkPlan: ReturnType<typeof planTrunk> = null
       let trunkReused = false
+      // Bulk-Schnitt nach Zügen: declared here so the result can report it.
+      let bulk = false
+      let turnsArg: number | undefined
       // For scope "span" without summary: the kept entry the retry reuses.
       let keptEntry: KeptSummary | null = null
       // The checkpoint text handed to the engine (scope "span" only).
@@ -538,7 +606,38 @@ export function apply(ctx: Context, config: Config) {
         // nimmt ihn unverändert wieder auf — der Wiederversuch kostet dann nur
         // den Werkzeugaufruf, nicht die erneute Niederschrift des Checkpoints.
         summaryText = summaryArg
-        if (summaryArg && config.keepFailedSummary) {
+        // Bulk-Schnitt nach Zügen (Anordnung des Menschen 2026-10-30): „nicht nur
+        // ein Ding, sondern mehrere, hintereinander — halt in einem Riesenrutsch“
+        // und „immer noch inkrementell“. Das Modell nennt die Zahl der fertigen
+        // Züge, die in EINEN Checkpoint gebündelt werden; die Grenzen kommen aus
+        // der Turn-Tabelle, nicht aus zitierten Anfängen, weil die Ankerwahl das
+        // gemessene Versagen war (10.000 statt 300.000 Token).
+        const turnsArgLocal = typeof args.turns === 'number' && Number.isFinite(args.turns) ? Math.max(0, Math.floor(args.turns)) : undefined
+        turnsArg = turnsArgLocal
+        if (turnsArg !== undefined && turnsArg > 0) {
+          const table = turnTableOf(session)
+          if (!table) throw new Error('the turn table is not available for this session; call context_compact_plan to measure, then compact with startAnchor/endAnchor')
+          const keep = keepTurnsOf(args.keep_turns)
+          const row = turnCutRow(table, turnsArg, keep)
+          if (!row) {
+            throw new Error('turns=' + turnsArg + ' is not a safe bulk compaction: the working-memory window keeps the newest ' + keep + ' finished turn(s) untouched, and ' + table.turns.filter((g) => g.finished).length + ' finished turn(s) exist. Call context_compact_plan to see the allowed rows.')
+          }
+          if (!summaryArg) throw new Error('turns=' + turnsArg + ' needs summary: write the checkpoint that covers all ' + turnsArg + ' turns (lossless, one checkpoint for the whole stretch)')
+          si = nodes.findIndex((n) => n.seq === row.startSeq)
+          ei = nodes.findIndex((n) => n.seq === row.endSeq)
+          if (si < 0 || ei < si) throw new Error('the turn table range [' + row.startSeq + ',' + row.endSeq + '] is no longer on the surface; call context_compact_plan again')
+          startSeq = row.startSeq
+          endSeq = row.endSeq
+          bulk = true
+          // A turn boundary is balanced by construction (the turn ended, so every
+          // tool call in the span has its result); check it here rather than let
+          // the core reject a mid-step end after the checkpoint was written.
+          if (!balancedAfterEach(nodes)[ei]) {
+            throw new Error('turns=' + turnsArg + ' ends inside a step that is still open (seq ' + endSeq + '); call context_compact_plan again — the running turn is never included')
+          }
+          if (config.keepFailedSummary) stash.save(sid, { text: summaryText as string, startAnchor: rawStartAnchor, endAnchor: rawEndAnchor, startSeq, endSeq })
+        }
+        if (summaryArg && config.keepFailedSummary && !bulk) {
           // Sofort merken: auch wenn die Anker-Auflösung gleich scheitert
           // (AMBIGUOUS / not found), bleibt der Text erhalten.
           stash.save(sid, { text: summaryArg, startAnchor: rawStartAnchor, endAnchor: rawEndAnchor })
@@ -560,7 +659,7 @@ export function apply(ctx: Context, config: Config) {
           // Eintrag verbraucht, bei Fehlschlag wird er unten wieder abgelegt.
           stash.takeMatched(sid, { startSeq: last.startSeq, endSeq: last.endSeq })
         }
-        if (!keptEntry) {
+        if (!keptEntry && !bulk) {
           let b: ReturnType<typeof resolveBoundaries>
           try {
             b = resolveBoundaries(nodes, args)
@@ -733,6 +832,12 @@ export function apply(ctx: Context, config: Config) {
       }
       // 调试指标只进日志，不进入模型可见的工具结果。
       ctx.logger.info('[context_compact] %s %s %d..%d, shadowed %d nodes / %s tokens, surface %d -> after, usage=%o', agent.session.id, trunkPlan ? 'shared trunk' : 'span', startSeq, endSeq, Array.isArray(result.shadowedSeqs) ? result.shadowedSeqs.length : 0, String(result.shadowedTokenCount ?? '?'), nodes.length, usage)
+      // Die gemessene Zahl geht INS Modell-Ergebnis (Anordnung des Menschen
+      // 2026-10-30): das Modell behauptete „300.000 Token gespart“ nach einem
+      // 10.000-Token-Schnitt. Es hat keine eigene Messung; die Zahl des Kerns
+      // ist die einzige, die es nennen darf, also steht sie im Ergebnis und in
+      // der Fertig-Meldung, die der Kern an den Checkpoint hängt.
+      const freedMeasured = typeof result.shadowedTokenCount === 'number' ? result.shadowedTokenCount : null
       const out: {
         ok: boolean
         archived: { locator: JsonValue; retrievalHint: JsonValue } | null
@@ -740,6 +845,8 @@ export function apply(ctx: Context, config: Config) {
         sharedTrunk?: { key: string; reused: boolean }
         recall?: string
         reused?: boolean
+        freedTokens?: number
+        bulkTurns?: number
       } = {
         ok: true,
         archived: archived ? {
@@ -751,7 +858,63 @@ export function apply(ctx: Context, config: Config) {
       if (trunkPlan) out.sharedTrunk = { key: trunkPlan.key, reused: trunkReused }
       if (recallId) out.recall = recallId
       if (keptEntry) out.reused = true
+      if (freedMeasured !== null) out.freedTokens = freedMeasured
+      if (bulk && turnsArg !== undefined) out.bulkTurns = turnsArg
       return out
+    },
+  })))
+
+  // The measuring tool (Anordnung des Menschen 2026-10-30: "da müssen wir vielleicht
+  // ein Tool bauen, was womit es das messen kann"). It answers the question the
+  // model cannot answer from the transcript: how big is each candidate compaction.
+  disposers.push(tools.register(defineTool({
+    name: 'context_compact_plan',
+    description: 'Measure compaction candidates before compacting: the turn table of this session — every finished turn, its token size, and the spans a bulk compaction can fold into one checkpoint. Use this instead of guessing an anchor span. It names the working-memory window (the newest finished turns you must keep) and flags rows below a requested minimum. Pass the row\'s `turns` number to context_compact as `turns`; do not quote openings for a bulk compaction.',
+    parameters: {
+      keep_turns: { type: 'number', description: 'Working-memory window: the newest N finished turns must stay untouched. Defaults to this profile\'s setting (3).' },
+      min_freed: { type: 'number', description: 'Optional: the minimum tokens one compaction must free. Rows below it are flagged as too small.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string', required: true, description: 'The turn table: one line per candidate span, with the markers to copy and the tokens each cut frees.' },
+        },
+      },
+      render(args, value) { return [{ type: 'text', text: (value as { text: string }).text }] },
+    },
+    async execute(args, exec) {
+      const agent = agentOf(exec)
+      if (!agent) throw new Error('no agent session available for this call')
+      const session = agent.session as SessionLike & TrunkSessionLike
+      const table = turnTableOf(session)
+      if (!table) throw new Error('the turn table is not available: this session surface holds no nodes (a fresh session has nothing to measure yet)')
+      const keep = keepTurnsOf(args.keep_turns)
+      const minFreed = typeof args.min_freed === 'number' && Number.isFinite(args.min_freed) ? Math.max(0, Math.floor(args.min_freed)) : undefined
+      const rows = planRows(table, keep, 8)
+      const finished = table.turns.filter((g) => g.finished).length
+      const running = table.turns.length - finished
+      const head =
+        'Turn table: ' + table.totalSurfaceTokens + ' tokens on the surface, ' + finished + ' finished turn(s)' +
+        (running > 0 ? ' plus ' + running + ' running turn (never compactable)' : '') +
+        '. Working-memory window: the newest ' + keep + ' finished turn(s) stay untouched.'
+      if (!rows.length) {
+        return { text: head + '\nNothing is safe to compact yet: every finished turn sits inside the working-memory window. Keep working, then measure again when a longer stretch has closed.' }
+      }
+      const lines = rows.map((r) =>
+        'turns=' + r.k + ': ' + r.startMarker + ' .. ' + r.endMarker +
+        ' | frees ~' + r.grossTokens + ' tokens (' + r.nodes + ' nodes)' +
+        ' | cut price ~' + r.priceTokens + ' tokens' +
+        (minFreed !== undefined && r.grossTokens < minFreed ? ' | TOO SMALL for the requested minimum of ' + minFreed : ''),
+      )
+      const deepest = rows[0]
+      return {
+        text: head + '\n' + lines.join('\n') +
+          '\n\nCall context_compact with turns=' + deepest.k + ' (plus your checkpoint as summary) for the largest safe compaction. ' +
+          'A bulk compaction folds whole scenes into ONE checkpoint — do not split a finished stretch into several small ones, and do not stop at the last small block. ' +
+          'The freed-token number you get back from context_compact is measured by the engine; report that number, never your own estimate.',
+      }
     },
   })))
 
