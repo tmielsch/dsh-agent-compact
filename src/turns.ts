@@ -216,6 +216,37 @@ export function planRows(table: TurnTable, keepTurns: number, maxRows = 6): Turn
   return rows
 }
 
+/**
+ * Shrink a turn-row cut so it never starts on the system head.
+ *
+ * Die Turn-Tabelle beginnt eine Spanne am ersten Knoten des ersten Zuges. Sitzt
+ * dieser Knoten auf dem Systemkopf (surface node 0 traegt den Systemprompt), lehnt
+ * der Kern den Schnitt ab — und die bereits geschriebene `compaction/summary`
+ * macht den Log beim naechsten Start unladbar (gemessen 2026-10-31:
+ * "compaction cannot shadow the protected system head").
+ *
+ * Der Anker-Weg (`resolveBoundaries` in ./boundary.ts) nimmt den Kopf seit jeher
+ * aus; der Massenschnitt tat es nicht. Diese Funktion schliesst die Luecke an
+ * einer Stelle, die ohne laufenden Kern pruefbar ist.
+ *
+ * @param startPos - Oberflaechen-Position, an der die Spanne beginnen soll.
+ * @param endPos - Oberflaechen-Position, an der sie enden soll (inklusive).
+ * @param headCount - Anzahl der `system/message`-Knoten am Kopf (`systemHeadCount`).
+ * @returns die verschobene Startposition; sie liegt nie auf dem Kopf.
+ * @throws RangeError wenn nach dem Verschieben keine Spanne mehr uebrig bleibt.
+ */
+export function offSystemHead(startPos: number, endPos: number, headCount: number): number {
+  if (headCount <= 0) return startPos
+  const shifted = Math.max(startPos, headCount)
+  if (shifted > endPos) {
+    throw new RangeError(
+      'span ' + startPos + '..' + endPos + ' lies entirely on the system head (' +
+      headCount + ' node(s)); nothing is left to compress after it',
+    )
+  }
+  return shifted
+}
+
 /** The single row for exactly `k` finished turns, or null when it is not allowed. */
 export function turnCutRow(table: TurnTable, k: number, keepTurns: number): TurnCutRow | null {
   const rows = planRows(table, keepTurns, 1000)
