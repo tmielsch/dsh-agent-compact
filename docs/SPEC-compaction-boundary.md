@@ -132,3 +132,30 @@ A5. `git diff` zeigt keine Änderung außerhalb dieses Plugins.
 
 - 2026-10-31 Draft 1: aus der Wahl „B“ und den gemessenen Zahlen geschrieben; Umsetzung
   im selben Zug begonnen (`src/budget.ts`, `src/compaction-guard.ts`).
+## 6. Änderungsverlauf
+
+- 2026-10-31 Draft 1: aus der Wahl „B“ und den gemessenen Zahlen geschrieben; Umsetzung
+  im selben Zug begonnen (`src/budget.ts`, `src/compaction-guard.ts`).
+- 2026-10-31 gebaut als `0.2.1-trunk.26` (Commit 8b9261b auf
+  `feature/compaction-grenze`, gemergt mit `--no-ff` als 88c1849, Tag
+  `v0.2.1-trunk.26`, Release mit Tarball). 189 Tests grün, davon 17 neu
+  (`test/budget.test.mjs` 9, `test/compaction-guard.test.mjs` 8). Im Profil `web`
+  installiert; die Sichtprüfung (A2–A4) braucht einen Neustart von `dsh web` und
+  steht noch aus.
+
+## 7. Offene Entscheidung des Menschen (nicht gebaut, bewusst)
+
+Die Antwort-Reserve entscheidet, WO im Fenster die Grenze liegt, ohne eine Zeile
+Code:
+
+| Reserve (`maxTokens` der Route) | Prompt-Budget im 1M-Fenster | Grenze bei 90 % davon | das sind, in der Fensteranzeige |
+|---|---|---|---|
+| 256000 (heute) | 739.904 | 665.913 | 66,6 % |
+| 65536 | 930.368 | 837.331 | 83,7 % |
+| 32768 | 963.136 | 866.822 | 86,7 % |
+
+Mit der heutigen Reserve greift die Grenze also schon bei rund zwei Dritteln der
+Anzeige — sicher, aber früher als der Mensch sie erwartet. Die Frage an ihn:
+darf eine einzelne Antwort höchstens 32768 oder 65536 Token lang werden? Wenn ja,
+wird die Reserve gesenkt und die Grenze wandert auf 84–87 % der Anzeige. Bis zu
+seiner Antwort bleibt die Reserve bei 256000; die Grenze ist dann konservativ.
