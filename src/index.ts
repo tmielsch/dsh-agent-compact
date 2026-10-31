@@ -16,7 +16,9 @@ import { normText } from './normalize.js'
 import { CtxSurfaceService } from './ctx-surface.js'
 import { balancedAfterEach, prefixHits, resolveBoundaries, soleToolCall, spanText, tailCutPrice } from './boundary.js'
 import { markerTag } from './anchor.js'
-import { limitNudgeText, nudgeMode } from './phase.js'
+import { limitNudgeText, nudgeMode, zwischenfazitText } from './phase.js'
+import { boundaryCommandText, budgetSentence, judgeBudget, wouldOverflow, type BudgetPolicy, type BudgetReading } from './budget.js'
+import { installCompactionGuard, type GuardAgent, type GuardCut } from './compaction-guard.js'
 import { nodeFlatText } from './surface-text.js'
 import { ForkRegistry, SharedTrunkMemo } from './memo.js'
 import { forkCut, forkParent, lockedSpanError, surfaceEvents } from './trunk.js'
@@ -37,15 +39,32 @@ export interface Config {
   trunkGuard: boolean
   keepFailedSummary: boolean
   keepTurns: number
+  boundaryRatio: number
+  nudgeRatio: number
+  boundarySafetyTokens: number
+  compactMidTurn: boolean
+  overflowRecovery: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
   autoArchive: Schema.boolean().default(true).description('context_compact saves the full raw span to a spill artifact before replacing it.'),
   keepFailedSummary: Schema.boolean().default(true).description('A failed compaction keeps the written checkpoint text: the retry may omit `summary` to reuse it unchanged (in memory for this process only; a rewrite after a restart copies it from the previous message).'),
-  contextHardLimitTokens: Schema.number().default(300000).description('Upper bound: when the context occupancy reaches this many tokens, the hint appears. Set to 0 to disable. This is the only trigger message the plugin sends; the phase hint was removed on 2026-10-30 by the human\'s order ("der phasenhinweis muss raus"), because a hint that fires on growth pushed the session into compactions it did not need.'),
+  contextHardLimitTokens: Schema.number().default(0).description('Optional absolute limit in tokens, on top of the window-relative boundary. 0 (default) turns it off: a fixed number was the wrong trigger, because 300000 tokens is 30 % of a 1000000-token window and 77 % of a 262144-token one. The boundary is measured against the request budget now — see boundaryRatio. This is the only trigger message the plugin sends besides the boundary itself; the phase hint was removed on 2026-10-30 by the human\'s order ("der phasenhinweis muss raus").'),
   sharedStoreDir: Schema.string().default('').description('Directory for the shared-trunk memo (content-addressed trunk checkpoints) and the fork registry. Empty keeps both in memory only, so they do not survive a restart.'),
   trunkGuard: Schema.boolean().default(true).description('Guard automatic compaction in forked sessions (and in parents with known forks): a range reaching into the inherited trunk becomes the shared trunk compaction, or is clamped to start after it.'),
   keepTurns: Schema.number().default(3).description('Working-memory window: the newest N finished turns are never part of a turn-based compaction. The human\'s order (2026-10-30): "Wir haben 10 Turns, 3 oder 4 dürfen maximal" — compact everything older than this window, in one checkpoint per stretch.'),
+  // Harte Compaction-Grenze (Weg B, Entscheidung des Menschen 2026-10-31: "Können
+  // wir B machen?"). Der Kern bleibt mit `auto: false` aus; dieses Plugin hält die
+  // Grenze selbst, am Zug-Ende und mitten im Zug, und rettet die Anfrage nach einer
+  // Ablehnung. Die Grenze wird gegen das BUDGET einer Anfrage gemessen — Fenster
+  // minus Antwort-Reserve minus Sicherheit —, nicht gegen das nackte Fenster:
+  // sonst liegt sie über der Grenze, an der der Anbieter schon ablehnt (gemessen:
+  // 256.000 Reserve im 1.000.000-Fenster ergibt nur 739.904 Token Prompt-Budget).
+  boundaryRatio: Schema.number().default(0.9).description('Hard boundary: at this share of the REQUEST budget (window minus safety minus the answer reserve) the plugin compacts, no matter what. The share of the visible window depends on the configured answer reserve: with maxTokens 256000 in a 1000000 window the boundary is ~67% of the window, with 65536 it is ~84%. Set 0 to disable the guard.'),
+  nudgeRatio: Schema.number().default(0.75).description('Share of the request budget at which the model is told, with the measured numbers, to compact now (the "absolute command" the human asked for on 2026-10-31). Never above boundaryRatio.'),
+  boundarySafetyTokens: Schema.number().default(4096).description('Room kept free below the context window, so a request never sits exactly on the provider limit.'),
+  compactMidTurn: Schema.boolean().default(true).description('Hold the boundary between steps of a running turn as well. Never before the FIRST step of a turn: that is where the kernel used to replace the answer with a compaction (the human forbade it on 2026-10-30).'),
+  overflowRecovery: Schema.boolean().default(true).description('When the provider rejects a request with CONTEXT_WINDOW_EXCEEDED, compact once and retry that request instead of letting the turn die.'),
 })
 
 export function apply(ctx: Context, config: Config) {
@@ -138,6 +157,15 @@ export function apply(ctx: Context, config: Config) {
     compactRegion(start: number, end: number, agent: AgentWithSession, signal?: AbortSignal): Promise<CompactionResultLike>
   }
 
+  /** The automatic paths of `dsh-compaction-basic` (they exist even with `auto: false`). */
+  interface CompactionGuardLike {
+    compactIfNeeded?: (
+      agent: AgentWithSession,
+      trigger: 'pressure' | 'context-overflow',
+      signal?: AbortSignal,
+    ) => Promise<CompactionResultLike | null>
+  }
+
   interface SessionEventLike {
     type?: string
     seq?: number
@@ -192,6 +220,40 @@ export function apply(ctx: Context, config: Config) {
     const projected = contextPressureProjectedTokensOf(session)
     if (projected !== null) return projected
     return surfaceTokensOf(session)
+  }
+
+  /**
+   * The three measured numbers a request budget needs: the prompt-side occupancy,
+   * the routed model's real context window and the answer reserve that same
+   * request demands. The reserve is what the provider charges to the same window,
+   * which is why a request can be rejected at 86 % of the visible window.
+   */
+  function budgetReadingOf(session: SessionLike): BudgetReading | null {
+    const promptTokens = occupancyTokensOf(session)
+    if (promptTokens === null) return null
+    let windowTokens: number | null = null
+    try {
+      const info = (session as unknown as { requestContext?: () => { contextWindow?: unknown } | undefined }).requestContext?.()
+      if (info && typeof info.contextWindow === 'number' && info.contextWindow > 0) windowTokens = info.contextWindow
+    } catch (e) {
+      /* fall through: an unknown window means the guard stays silent */
+    }
+    if (windowTokens === null) return null
+    let reserveTokens = 0
+    try {
+      const header = session.requestHeader?.() as { config?: { maxTokens?: unknown } } | undefined
+      const max = header && header.config ? header.config.maxTokens : undefined
+      if (typeof max === 'number' && max > 0) reserveTokens = max
+    } catch (e) {
+      /* no header yet: the adapter default applies, the guard treats it as unknown */
+    }
+    return { promptTokens, windowTokens, reserveTokens }
+  }
+
+  const budgetPolicy: BudgetPolicy = {
+    boundaryRatio: typeof config.boundaryRatio === 'number' ? config.boundaryRatio : 0.9,
+    nudgeRatio: typeof config.nudgeRatio === 'number' ? config.nudgeRatio : 0.75,
+    safetyTokens: typeof config.boundarySafetyTokens === 'number' ? config.boundarySafetyTokens : 4096,
   }
 
   function resolveService(agent: AgentLike, serviceName: string): unknown {
@@ -390,6 +452,74 @@ export function apply(ctx: Context, config: Config) {
     /* agents service not mounted yet: agent/created covers later agents */
   }
 
+  // ---- Harte Compaction-Grenze (Weg B, Entscheidung des Menschen 2026-10-31) ----
+  //
+  // Der Kern bleibt mit `auto: false` aus, weil er sonst vor dem ersten Schritt
+  // eines Zuges verdichtet und damit die Antwort des Menschen ersetzt (Vorfall
+  // 2026-10-30). Damit fehlt aber auch seine Rettung nach CONTEXT_WINDOW_EXCEEDED.
+  // Diese Verdrahtung hält die Grenze selbst: am Zug-Ende (dort wartet niemand),
+  // mitten im Zug ab dem zweiten Schritt, und im Notfall vor einer Anfrage, die
+  // sonst abgelehnt würde — mit genau einem Wiederholungsversuch danach.
+  try {
+    const guardAgent = (agent: unknown): GuardAgent | null => {
+      const a = agent as { session?: SessionLike; status?: unknown } | undefined
+      return a && a.session ? (a as unknown as GuardAgent) : null
+    }
+    const cutOf = (a: GuardAgent): GuardCut | null => {
+      const session = (a as unknown as { session: SessionLike & TrunkSessionLike }).session
+      const table = turnTableOf(session)
+      if (!table) return null
+      const rows = planRows(table, keepTurnsOf(), 1)
+      if (!rows.length) return null
+      const row = rows[0]
+      return { startSeq: row.startSeq, endSeq: row.endSeq, turns: row.k, grossTokens: row.grossTokens }
+    }
+    const engineFor = (a: GuardAgent): (CompactionLike & CompactionGuardLike) | null => {
+      const engine = resolveService(a as unknown as AgentLike, 'compaction') as (CompactionLike & CompactionGuardLike) | undefined
+      if (!engine) return null
+      try {
+        patchEngine(engine as unknown as OptimizedEngineLike, trunkDeps)
+      } catch (e) {
+        /* the patch is an optimization; a stock engine still compacts */
+      }
+      return engine
+    }
+    const freed = (result: CompactionResultLike | null | undefined): number | undefined =>
+      result && typeof result.shadowedTokenCount === 'number' ? result.shadowedTokenCount : undefined
+
+    const disposeGuard = installCompactionGuard(
+      ctx,
+      {
+        policy: budgetPolicy,
+        compactMidTurn: config.compactMidTurn !== false,
+        overflowRecovery: config.overflowRecovery !== false,
+      },
+      {
+        reading: (a) => {
+          const session = (a as unknown as { session?: SessionLike }).session
+          return session ? budgetReadingOf(session) : null
+        },
+        planCut: (a) => cutOf(a),
+        compactCut: async (a, cut, signal) => {
+          const engine = engineFor(a)
+          if (!engine) return null
+          const result = await engine.compactRegion(cut.startSeq, cut.endSeq, a as unknown as AgentWithSession, signal)
+          return { freedTokens: freed(result) }
+        },
+        compactEmergency: async (a, signal) => {
+          const engine = engineFor(a)
+          if (!engine || typeof engine.compactIfNeeded !== 'function') return null
+          const result = await engine.compactIfNeeded(a as unknown as AgentWithSession, 'context-overflow', signal)
+          return { freedTokens: freed(result) }
+        },
+        note: (level, message) => (level === 'warn' ? ctx.logger.warn('%s', message) : ctx.logger.info('%s', message)),
+      },
+    )
+    disposers.push(disposeGuard)
+  } catch (e) {
+    ctx.logger.warn('[context_compact] compaction guard is not installed: %s', e instanceof Error ? e.message : String(e))
+  }
+
   // 通过 systemPrompt.context() 注入尾部实时提示：仅在增长跨过整数倍的那几步
   // Fork: Anker-Marker im Nudge. Der Hinweis listet die letzten verankerbaren
   // Nachrichten mit einer festen Kennung `[a###]` auf. Ein Modell, das diese
@@ -461,25 +591,33 @@ export function apply(ctx: Context, config: Config) {
       order: 50,
       text: () => {
         try {
-          const hardLimit = config.contextHardLimitTokens
-          if (!(hardLimit > 0)) return ''
+          if (!(budgetPolicy.boundaryRatio > 0)) return ''
           const agentsService = ctx.get('agents')
           const current = agentsService && typeof (agentsService as { currentInitiator?: unknown }).currentInitiator === 'function'
             ? (agentsService as { currentInitiator: () => unknown }).currentInitiator()
             : undefined
           const agent = current as { session?: SessionLike } | undefined
           if (!agent || !agent.session) return ''
-          const now = occupancyTokensOf(agent.session)
-          if (now === null) return ''
-          // Der Phasenhinweis ist entfernt (Anordnung des Menschen 2026-10-30:
-          // „der phasenhinweis muss raus“). Die einzige Auslöser-Meldung ist die
-          // harte Obergrenze; das Modell verdichtet sonst aus der Regel im
-          // Werkzeugtext, am Ende einer abgeschlossenen Phase.
-          if (nudgeMode(now, hardLimit) !== 'limit') return ''
+          // Die einzige Auslöser-Meldung ist die Grenze (Anordnung des Menschen
+          // 2026-10-30: „der phasenhinweis muss raus“; 2026-10-31: bei 90 % ein
+          // absoluter Befehl). Die Grenze wird gegen das Anfrage-Budget gemessen,
+          // nicht gegen das nackte Fenster — siehe src/budget.ts.
+          const reading = budgetReadingOf(agent.session)
+          if (!reading) return ''
+          const verdict = judgeBudget(reading, budgetPolicy)
+          if (!verdict) return ''
+          const absolute = verdict.kind === 'compact'
+          if (verdict.kind === 'ok') {
+            // Die alte absolute Obergrenze bleibt als zusätzlicher Auslöser nutzbar
+            // (Vorgabe jetzt 0 = aus). Sie war 300.000 Token und traf damit auf einem
+            // 1M-Fenster schon bei 30 % — das war der Lärm, den der Mensch entfernt hat.
+            const hardLimit = config.contextHardLimitTokens
+            if (!(hardLimit > 0) || nudgeMode(reading.promptTokens, hardLimit) !== 'limit') return ''
+          }
           const markers = markerLines(agent.session)
-          // Turn-basierte Größe (Anordnung des Menschen 2026-10-30): die harte
-          // Obergrenze nennt die größte sichere Bündel-Verdichtung in Token, damit
-          // das Modell nicht rät und den letzten 10.000-Token-Brocken nimmt.
+          // Turn-basierte Größe (Anordnung des Menschen 2026-10-30): die Grenze nennt
+          // die größte sichere Bündel-Verdichtung in Token, damit das Modell nicht rät
+          // und den letzten 10.000-Token-Brocken nimmt.
           const table = turnTableOf(agent.session as SessionLike & TrunkSessionLike)
           const rows = table ? planRows(table, keepTurnsOf(), 3) : []
           const bulk = rows.length
@@ -487,8 +625,13 @@ export function apply(ctx: Context, config: Config) {
               rows.map((r) => 'turns=' + r.k + ': frees ~' + r.grossTokens + ' tokens (' + r.nodes + ' nodes), cut price ~' + r.priceTokens + ' tokens').join('\n') +
               '\nCall context_compact with turns=' + rows[0].k + ' and your summary; call context_compact_plan for the markers.'
             : ''
-          return limitNudgeText(now) + bulk +
-            (markers ? '\n\nAnchor markers for the most recent messages, each with its cut price — using one as startAnchor or endAnchor names exactly one message and never fails (preferred over quoting text). The price is the tokens re-read if you cut at that marker; a lower price means a cheaper cut:\n' + markers : '')
+          const tail = (markers ? '\n\nAnchor markers for the most recent messages, each with its cut price — using one as startAnchor or endAnchor names exactly one message and never fails (preferred over quoting text). The price is the tokens re-read if you cut at that marker; a lower price means a cheaper cut:\n' + markers : '')
+          if (absolute) {
+            return boundaryCommandText(reading, verdict) +
+              '\n\nThe command replaces the phase rule for this turn: compact as the LAST action of this turn, after you have answered the human. If a finished stretch of turns is listed below, take it in ONE checkpoint.\n' +
+              zwischenfazitText() + bulk + tail
+          }
+          return boundaryCommandText(reading, verdict) + '\n\n' + limitNudgeText(reading.promptTokens) + bulk + tail
         } catch (e) {
           return ''
         }

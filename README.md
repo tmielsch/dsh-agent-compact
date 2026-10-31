@@ -95,15 +95,61 @@ If the plugin was additionally mounted through a row in the profile's `cordis.pa
 |---|---|---|
 | `autoArchive` | `true` | `context_compact` saves the full raw span to a spill artifact before replacing it |
 | `keepFailedSummary` | `true` | A failed compaction keeps the checkpoint text the model wrote: the retry may omit `summary` and reuse it unchanged (kept in memory for the running process; after a restart the text is still word-for-word in the previous message and is copied from there) |
-| `volumeNudgeTokens` | `50000` | Every time accumulated surface growth (heuristic token count) since the last compaction crosses another multiple of this amount, remind the model to consider `context_compact`. `0` disables the nudge. |
+| `boundaryRatio` | `0.9` | **Hard boundary** (see "Hard boundary" below): at this share of the *request budget* the plugin compacts by itself — at the end of the turn, mid-turn from the second step on, and before any request that would otherwise be rejected. `0` disables the guard |
+| `nudgeRatio` | `0.75` | Share of the request budget at which the model is told, with the measured numbers, to compact now; never above `boundaryRatio` |
+| `boundarySafetyTokens` | `4096` | Room kept free below the context window |
+| `compactMidTurn` | `true` | Hold the boundary between the steps of a running turn — never before the **first** step (see "Hard boundary") |
+| `overflowRecovery` | `true` | On `CONTEXT_WINDOW_EXCEEDED`, compact once and retry that request instead of letting the turn die |
+| `keepTurns` | `3` | Working-memory window: the newest N finished turns are never part of a turn-based compaction |
+| `contextHardLimitTokens` | `0` | Optional absolute limit on top of the window-relative boundary; `0` turns it off (a fixed number is wrong: 300000 tokens is 30 % of a 1M window and 77 % of a 262144 one) |
 
 Pass through the inserted row in the profile's `cordis.patch.yml` or a bundle patch.
+
+## Hard boundary
+
+The kernel's own automatic compaction is a single switch: `auto: false` in
+`dsh-compaction-basic` disables the pre-step compaction **and** the rescue after a
+`CONTEXT_WINDOW_EXCEEDED` rejection. Turning it off is right — the kernel compacts
+before the first step of a turn, and that replaced an answer to the human
+(2026-10-30) — but it leaves a session with no brake at all.
+
+This plugin holds the boundary itself. It measures three numbers per request and
+judges the prompt against the budget a request really has:
+
+```text
+budget = window − safety − answer reserve      (the reserve is the request's own maxTokens)
+boundary (90 %) = prompt ≥ 0.9 × budget
+```
+
+Why that is not "90 % of the window": the answer reserve is charged to the same
+window. With `maxTokens: 256000` in a `1000000` window only 739 904 tokens of
+prompt fit, so the visible window shows ~67 % when the budget is exhausted, and a
+request at 86 % of the window already asks for 116 %. That is the rejected request
+the human reported on 2026-10-31. Set the model's `maxTokens` smaller (e.g.
+`65536`) and the same boundary sits at ~93 % of the window — no code change.
+
+Three layers, in the order they fire:
+
+1. **Turn end** (`agent/status` → `idle`): over the boundary, compact immediately.
+   Nobody is waiting; this is the normal case.
+2. **Mid-turn** (`agent/pre-step`, from step 2 on): hold the boundary during a long
+   turn. Never before the first step — there the 2026-10-30 rule wins.
+3. **Emergency**: the next request would be rejected (`prompt + reserve > window −
+   safety`) or the provider already rejected it. Compact regardless, and retry the
+   rejected request exactly once.
+
+Compaction itself is never agent-written here: it takes the oldest finished turns
+in one checkpoint (`keepTurns` untouched) and lets the engine's summarizer write it,
+falling back to `compactIfNeeded('context-overflow')` when no turn-based cut is
+allowed. Every decision writes one log line with both percentages. Below the
+boundary the model gets a measured nudge — a "compact now" instruction at
+`nudgeRatio`, an absolute command at the boundary.
 
 ## How it works
 
 - **Agent-written checkpoint**: `summary` is required for a fresh compaction (and for a retry that rewrites the text), so the tool path always uses the checkpoint the agent wrote. `patchEngine()` (see `src/optimizer.ts`) wraps the engine's `summarize()`: when an `_externalSummary` is present (one-shot, keyed per session id), it returns that text directly; only when none is present does it forward to the stock implementation — a branch that serves the automatic compaction path and keeps official behavior intact.
 - **System-prompt guidance**: the bundle registers a global prompt section (`tool:context_compact`, order 118) that tells the agent to use `context_compact` proactively — compress finished steps at topic boundaries instead of waiting for automatic full-context compaction.
-- **Proactive volume nudge**: a `systemPrompt.context()` injection (`agent-compact:volume-nudge`, order 50) reminds the model once each time the session's surface has grown by another `volumeNudgeTokens` (default `50000`) multiple since the last compaction. It measures occupancy via `contextPressure.projectedTokens` (falling back to `tokenMeter.measure().surfaceTokens`); the growth baseline resets on every `compaction/summary`; `0` disables it. As a tail `systemPrompt.context()`, unchanged text is a no-op (KV-cache friendly) and it is independent of the auto-compactor's pressure threshold.
+- **Measured occupancy nudge**: a `systemPrompt.context()` injection (`agent-compact:volume-nudge`, order 50) judges the prompt against the request budget (window minus answer reserve, see "Hard boundary"). From `nudgeRatio` (default `0.75`) it tells the model, with the measured numbers and the largest turn-based cut, to compact now; at `boundaryRatio` (default `0.9`) the text becomes an absolute command. It measures occupancy via `contextPressure.projectedTokens` (falling back to `tokenMeter.measure().surfaceTokens`). As a tail `systemPrompt.context()`, unchanged text is a no-op (KV-cache friendly) and it is independent of the auto-compactor's pressure threshold.
 - **Anchor matching** (`src/normalize.ts`): `normText` collapses whitespace and maps CJK full-width punctuation to half-width (，→, etc.), applied to both anchors and node text. Matching keeps **unique-prefix** semantics: zero hits → "not found" with closest-node hints; more than one hit → "AMBIGUOUS".
 - **Restart-safe sequential archives**: the next number is derived by scanning the session's spill directory (`max+1`) — gap-free; the backend's random hex prefix makes filename collisions impossible.
 - **Paired cleanup**: the tool-call message (carrying the full `summary` argument) and its tool/result are each replaced by one tiny shadow message, so the checkpoint text never appears twice on the surface (skipped when the message holds more than one tool call).
