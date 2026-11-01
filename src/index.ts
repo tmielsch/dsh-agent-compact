@@ -14,7 +14,8 @@ import { createShadowUserMessage } from './shadow-message.js'
 import { effectiveCut, patchEngine, planTrunk, runTrunkCompaction } from './optimizer.js'
 import { normText } from './normalize.js'
 import { CtxSurfaceService } from './ctx-surface.js'
-import { balancedAfterEach, prefixHits, resolveBoundaries, soleToolCall, spanText, tailCutPrice } from './boundary.js'
+import { balancedAfterEach, prefixHits, resolveBoundaries, soleToolCall, spanText, systemHeadCount, tailCutPrice } from './boundary.js'
+import { offSystemHead } from './turns.js'
 import { markerTag } from './anchor.js'
 import { limitNudgeText, nudgeMode, zwischenfazitText } from './phase.js'
 import { boundaryCommandText, budgetSentence, judgeBudget, wouldOverflow, type BudgetPolicy, type BudgetReading } from './budget.js'
@@ -769,8 +770,19 @@ export function apply(ctx: Context, config: Config) {
           si = nodes.findIndex((n) => n.seq === row.startSeq)
           ei = nodes.findIndex((n) => n.seq === row.endSeq)
           if (si < 0 || ei < si) throw new Error('the turn table range [' + row.startSeq + ',' + row.endSeq + '] is no longer on the surface; call context_compact_plan again')
-          startSeq = row.startSeq
-          endSeq = row.endSeq
+          // Systemkopf-Falle im Massenschnitt (gemessen 2026-10-31): die
+          // Turn-Tabelle beginnt die Spanne am ersten Knoten des ersten Zuges.
+          // Faellt dieser Knoten auf den Systemkopf, lehnt der Kern den Schnitt
+          // ab — und die schon geschriebene `compaction/summary` macht den Log
+          // beim naechsten Start unladbar. Deshalb hier dieselbe Ausnahme wie im
+          // Anker-Weg (`resolveBoundaries`): den Kopf nie in die Spanne nehmen.
+          try {
+            si = offSystemHead(si, ei, systemHeadCount(nodes))
+          } catch (e) {
+            throw new Error('turns=' + turnsArg + ' would compact only the system head (seq ' + row.startSeq + '..' + row.endSeq + '); nothing is left to compress there. Call context_compact_plan to see the allowed rows.')
+          }
+          startSeq = nodes[si].seq
+          endSeq = nodes[ei].seq
           bulk = true
           // A turn boundary is balanced by construction (the turn ended, so every
           // tool call in the span has its result); check it here rather than let
