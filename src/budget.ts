@@ -120,33 +120,29 @@ export function budgetSentence(reading: BudgetReading, verdict: BudgetVerdict): 
  * Der Mensch, 2026-10-31, wörtlich: *„dass einfach bei 90 % der Agent injected
  * bekommt, dass es ein absoluter Befehl ist, drop all compact now, otherwise
  * complete catastrophic failure"*. Ab der Grenze steht deshalb ein Befehl da, kein
- * Hinweis; ab `nudgeRatio` ein dringender Hinweis. Die Zahlen stehen dabei, weil
- * ein Befehl ohne Messwert nur Größe ist.
+ * Hinweis. Zwischen `nudgeRatio` und der Grenze sagt das Plugin nichts mehr
+ * (Entscheidung des Menschen 2026-11-06, „gut so").
  *
- * @param reading - gemessener Prompt, Fenster und Reserve.
- * @param verdict - das Urteil derselben Messung.
- * @returns der Text, oder '' wenn nichts zu sagen ist.
+ * Gemessener Fehler (Sitzung a856b862, 2026-11-05/06): der Text stand mit der
+ * aktuellen Prozentzahl, der Ankerliste und der Schnitt-Tabelle darin. Weil sich die
+ * Zahl bei jedem Schritt ändert, speicherte DSH jedes Mal einen neuen Block von rund
+ * 12.000 Zeichen — 21 Stück in einer Sitzung. Ein Block aus der laufenden Runde kann
+ * von einer Verdichtung nicht ersetzt werden und blieb mit „81 %" stehen, obwohl die
+ * Belegung nach der Verdichtung bei 68 % lag; das Modell glaubte ihm und verdichtete
+ * ein zweites Mal. Der Text ist deshalb FEST (ohne Zahl, ohne Liste): unveränderter
+ * Text wird nicht noch einmal gespeichert, und er sagt selbst, wann er erledigt ist.
+ *
+ * @returns der feste Befehlstext, byte-gleich bei jedem Aufruf.
  */
-export function boundaryCommandText(reading: BudgetReading, verdict: BudgetVerdict): string {
-  if (verdict.kind === 'ok') return ''
-  const numbers =
-    'You are at ' + verdict.budgetPercent + '% of the request budget (' +
-    Math.max(0, Math.floor(reading.promptTokens)) + ' of ' + verdict.budgetTokens +
-    ' tokens usable; the answer reserve of ' + Math.max(0, Math.floor(reading.reserveTokens)) +
-    ' tokens is already subtracted). That is ' + verdict.windowPercent + '% of the ' +
-    Math.floor(reading.windowTokens) + '-token window.'
-  if (verdict.kind === 'compact') {
-    return (
-      'ABSOLUTE COMMAND — compact NOW, it is not optional. ' + numbers + ' The harness compacts for you at this ' +
-      'point and that checkpoint is not yours: your measured work can be lost. Call `context_compact` in your ' +
-      'next tool call with a checkpoint you write, then continue. A request that runs into the boundary without ' +
-      'a compaction is rejected by the provider and the turn dies (complete failure).'
-    )
-  }
+export function boundaryCommandText(): string {
   return (
-    'Boundary approaching, act now rather than later. ' + numbers + ' At ' + verdict.thresholdTokens +
-    ' tokens the harness compacts for you and your own checkpoint is gone. Call `context_compact` with a ' +
-    'checkpoint you write, at the end of this turn.'
+    'ABSOLUTE COMMAND — the context has reached the hard boundary of this session. Compact NOW: call ' +
+    '`context_compact_plan` once, then `context_compact` with the largest allowed `turns=N` and a ' +
+    'checkpoint you write, as the LAST action of this turn after you have answered the human. ' +
+    'If you do not, the harness compacts at the end of this turn instead, and that checkpoint is not ' +
+    'yours. This block is spent as soon as a compaction has happened after it: if the conversation ' +
+    'above shows a compaction newer than this block, ignore it and do NOT compact again for it. ' +
+    'It names no numbers on purpose, because a number in it would be stale one step later.'
   )
 }
 

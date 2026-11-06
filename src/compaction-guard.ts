@@ -114,10 +114,19 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
     }
   }
 
+  // Einmal je Überschreitung (Entscheidung des Menschen 2026-11-06, „gut so"): hat der
+  // Wächter für die Grenze verdichtet, verdichtet er für DIESELBE Überschreitung nicht
+  // noch einmal — auch nicht, wenn der Schnitt die Belegung nicht unter die Grenze
+  // gebracht hat. Die Sperre geht erst wieder auf, wenn eine Messung unter der Grenze
+  // lag. Ausgenommen ist die Verhinderung einer Ablehnung (Lage 3): wenn die nächste
+  // Anfrage sonst abgelehnt würde, hat Verdichten Vorrang vor jeder Sperre.
+  const spent = new Set<string>()
+
   function verdictFor(agent: GuardAgent) {
     const reading = callbacks.reading(agent)
     if (!reading) return null
     const verdict = judgeBudget(reading, policy)
+    if (verdict && verdict.kind !== 'compact') spent.delete(sessionKey(agent))
     return verdict ? { reading, verdict } : null
   }
 
@@ -141,12 +150,14 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
           const overflow = wouldOverflow(judged.reading, policy.safetyTokens)
           const firstStepOfTurn = typeof step === 'number' && step <= 1
           const overBoundary = judged.verdict.kind === 'compact'
-          if (overflow || (overBoundary && options.compactMidTurn && !firstStepOfTurn)) {
+          const midTurn = overBoundary && options.compactMidTurn && !firstStepOfTurn && !spent.has(sessionKey(agent))
+          if (overflow || midTurn) {
             callbacks.note(
               'info',
               'compaction guard: ' + budgetSentence(judged.reading, judged.verdict) +
                 (overflow ? ' — the next request would be rejected, compacting before it' : ' — over the boundary mid-turn'),
             )
+            if (!overflow) spent.add(sessionKey(agent))
             await forceCompact(agent, overflow ? 'overflow prevention' : 'turn boundary', signal)
           }
         }
@@ -165,7 +176,12 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
       retried.delete(sessionKey(agent))
       const judged = verdictFor(agent)
       if (!judged || judged.verdict.kind !== 'compact') return
+      if (spent.has(sessionKey(agent))) {
+        callbacks.note('info', 'compaction guard at turn end: already compacted for this crossing of the boundary, not again (' + budgetSentence(judged.reading, judged.verdict) + ')')
+        return
+      }
       callbacks.note('info', 'compaction guard at turn end: ' + budgetSentence(judged.reading, judged.verdict))
+      spent.add(sessionKey(agent))
       // Nicht auf die Verdichtung warten: der Zug ist zu Ende, und ein hängender
       // Ereignis-Hörer würde den nächsten Zug blockieren.
       void forceCompact(agent, 'turn end')

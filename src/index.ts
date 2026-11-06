@@ -62,7 +62,7 @@ export const Config: Schema<Config> = Schema.object({
   // sonst liegt sie über der Grenze, an der der Anbieter schon ablehnt (gemessen:
   // 256.000 Reserve im 1.000.000-Fenster ergibt nur 739.904 Token Prompt-Budget).
   boundaryRatio: Schema.number().default(0.9).description('Hard boundary: at this share of the REQUEST budget (window minus safety minus the answer reserve) the plugin compacts, no matter what. The share of the visible window depends on the configured answer reserve: with maxTokens 256000 in a 1000000 window the boundary is ~67% of the window, with 65536 it is ~84%. Set 0 to disable the guard.'),
-  nudgeRatio: Schema.number().default(0.75).description('Share of the request budget at which the model is told, with the measured numbers, to compact now (the "absolute command" the human asked for on 2026-10-31). Never above boundaryRatio.'),
+  nudgeRatio: Schema.number().default(0.75).description('Kept for compatibility; sends no text any more (since trunk.28). The model hears something only at boundaryRatio, as a fixed command without numbers.'),
   boundarySafetyTokens: Schema.number().default(4096).description('Room kept free below the context window, so a request never sits exactly on the provider limit.'),
   compactMidTurn: Schema.boolean().default(true).description('Hold the boundary between steps of a running turn as well. Never before the FIRST step of a turn: that is where the kernel used to replace the answer with a compaction (the human forbade it on 2026-10-30).'),
   overflowRecovery: Schema.boolean().default(true).description('When the provider rejects a request with CONTEXT_WINDOW_EXCEEDED, compact once and retry that request instead of letting the turn die.'),
@@ -607,32 +607,18 @@ export function apply(ctx: Context, config: Config) {
           if (!reading) return ''
           const verdict = judgeBudget(reading, budgetPolicy)
           if (!verdict) return ''
-          const absolute = verdict.kind === 'compact'
-          if (verdict.kind === 'ok') {
-            // Die alte absolute Obergrenze bleibt als zusätzlicher Auslöser nutzbar
-            // (Vorgabe jetzt 0 = aus). Sie war 300.000 Token und traf damit auf einem
-            // 1M-Fenster schon bei 30 % — das war der Lärm, den der Mensch entfernt hat.
-            const hardLimit = config.contextHardLimitTokens
-            if (!(hardLimit > 0) || nudgeMode(reading.promptTokens, hardLimit) !== 'limit') return ''
-          }
-          const markers = markerLines(agent.session)
-          // Turn-basierte Größe (Anordnung des Menschen 2026-10-30): die Grenze nennt
-          // die größte sichere Bündel-Verdichtung in Token, damit das Modell nicht rät
-          // und den letzten 10.000-Token-Brocken nimmt.
-          const table = turnTableOf(agent.session as SessionLike & TrunkSessionLike)
-          const rows = table ? planRows(table, keepTurnsOf(), 3) : []
-          const bulk = rows.length
-            ? '\n\nBulk compaction by turns — the sizes are measured, not guessed. The newest ' + keepTurnsOf() + ' finished turn(s) stay untouched:\n' +
-              rows.map((r) => 'turns=' + r.k + ': frees ~' + r.grossTokens + ' tokens (' + r.nodes + ' nodes), cut price ~' + r.priceTokens + ' tokens').join('\n') +
-              '\nCall context_compact with turns=' + rows[0].k + ' and your summary; call context_compact_plan for the markers.'
-            : ''
-          const tail = (markers ? '\n\nAnchor markers for the most recent messages, each with its cut price — using one as startAnchor or endAnchor names exactly one message and never fails (preferred over quoting text). The price is the tokens re-read if you cut at that marker; a lower price means a cheaper cut:\n' + markers : '')
-          if (absolute) {
-            return boundaryCommandText(reading, verdict) +
-              '\n\nThe command replaces the phase rule for this turn: compact as the LAST action of this turn, after you have answered the human. If a finished stretch of turns is listed below, take it in ONE checkpoint.\n' +
-              zwischenfazitText() + bulk + tail
-          }
-          return boundaryCommandText(reading, verdict) + '\n\n' + limitNudgeText(reading.promptTokens) + bulk + tail
+          // Nur an der Grenze selbst. Zwischen nudgeRatio und der Grenze sagt das Plugin
+          // nichts: der Wächter greift dort ohnehin nicht ein, und die Mahnung stand in
+          // Sitzung a856b862 elf Stunden lang und trieb das Modell zu 50–63k-Happen
+          // statt zu den Blöcken ab 70.000 Token, die der Mensch angeordnet hat.
+          //
+          // Der Text ist FEST — ohne Prozentzahl, ohne Ankerliste, ohne Tabelle. Die
+          // Größen der Schnitte liest das Modell mit `context_compact_plan`, wenn es
+          // verdichten will; der Befehl nennt nur, WAS zu tun ist. Dadurch bleibt der
+          // Text von Schritt zu Schritt byte-gleich und wird nicht jedes Mal als neuer
+          // Block gespeichert (gemessen: 21 Blöcke zu je ~12.000 Zeichen).
+          if (verdict.kind !== 'compact') return ''
+          return boundaryCommandText()
         } catch (e) {
           return ''
         }
