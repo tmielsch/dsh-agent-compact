@@ -86,11 +86,15 @@ R5. **Eine Wiederholung nach Ablehnung.** Meldet der Anbieter
     `CONTEXT_WINDOW_EXCEEDED`, verdichtet das Plugin einmal und lässt die Anfrage
     wiederholen; danach keine weitere Wiederholung in diesem Zug.
 
-R6. **Der Befehl an das Modell.** Zwischen `nudgeRatio` (Vorgabe 0,75) und
-    `boundaryRatio` erhält das Modell eine Anweisung, die die gemessenen Zahlen
-    nennt und als Befehl formuliert ist („call context_compact now“), mit dem
-    nächstbesten `turns=N` und dessen gemessener Ersparnis. Sie ist die letzte
-    weiche Lage; die harte Grenze hängt nicht von ihr ab.
+R6. **Der Befehl an das Modell.** An der Grenze (`boundaryRatio`, Vorgabe 0,9), und nur dort,
+    erhält das Modell einen absoluten Befehl zu verdichten. Der Text ist **fest**: keine
+    Prozentzahl, keine Ankerliste, keine Schnitt-Tabelle, byte-gleich bei jedem Schritt. Er
+    sagt, was zu tun ist (`context_compact_plan` einmal, dann `context_compact` mit dem
+    größten erlaubten `turns=N`, als letzte Handlung des Zugs), er sagt, dass er erledigt
+    ist, sobald nach ihm eine Verdichtung stattgefunden hat, und er verbietet die zweite
+    Verdichtung für ihn. Zwischen `nudgeRatio` und der Grenze sagt das Plugin nichts.
+    (Geändert 2026-11-06, siehe Änderungsverlauf; die frühere Fassung nannte die gemessenen
+    Zahlen und galt ab `nudgeRatio`.) Die harte Grenze hängt nicht von diesem Text ab.
 
 R7. **Nachvollziehbar.** Jede Entscheidung schreibt eine Zeile in das Host-Log: die
     Zahlen (Prompt, Reserve, Fenster, Prozent), die Entscheidung und bei einer
@@ -132,10 +136,6 @@ A5. `git diff` zeigt keine Änderung außerhalb dieses Plugins.
 
 - 2026-10-31 Draft 1: aus der Wahl „B“ und den gemessenen Zahlen geschrieben; Umsetzung
   im selben Zug begonnen (`src/budget.ts`, `src/compaction-guard.ts`).
-## 6. Änderungsverlauf
-
-- 2026-10-31 Draft 1: aus der Wahl „B“ und den gemessenen Zahlen geschrieben; Umsetzung
-  im selben Zug begonnen (`src/budget.ts`, `src/compaction-guard.ts`).
 - 2026-10-31 gebaut als `0.2.1-trunk.26` (Commit 8b9261b auf
   `feature/compaction-grenze`, gemergt mit `--no-ff` als 88c1849, Tag
   `v0.2.1-trunk.26`, Release mit Tarball). 189 Tests grün, davon 17 neu
@@ -159,3 +159,30 @@ Anzeige — sicher, aber früher als der Mensch sie erwartet. Die Frage an ihn:
 darf eine einzelne Antwort höchstens 32768 oder 65536 Token lang werden? Wenn ja,
 wird die Reserve gesenkt und die Grenze wandert auf 84–87 % der Anzeige. Bis zu
 seiner Antwort bleibt die Reserve bei 256000; die Grenze ist dann konservativ.
+
+## 8. Nachtrag 2026-11-06: doppelte Verdichtung durch einen veralteten Befehl
+
+Gemessen in Sitzung `a856b862-d0ef-4b53-b12e-a674a3a00c2c` (VST-Dev, deepseek-flash, Fenster
+384000, Antwort-Reserve 65536, Prompt-Budget 314368):
+
+- Der Hinweistext trug die aktuelle Prozentzahl, die Ankerliste und die Schnitt-Tabelle. Er
+  änderte sich bei jedem Schritt, und DSH speicherte jede Fassung als eigenen Block: **21
+  Blöcke zu je rund 12.000 Zeichen** in einer Sitzung, 19 davon Mahnungen zwischen 75 % und
+  90 %, 2 davon der absolute Befehl bei 91,4 % und 93,1 %.
+- Die Mahnung stand von 13:04 bis 23:32 des 5.11., also über neun Stunden, und das Modell
+  verdichtete in dieser Zeit in kleinen Happen von 30.000 bis 63.000 Token, obwohl der
+  Mensch Blöcke von mindestens 70.000 angeordnet hat.
+- Um 02:04 verdichtete das Modell (63.404 Token frei, Prompt von 256.143 auf 214.999, also
+  auf 68 % des Budgets). Der Block von 01:57 lag in der laufenden Runde und wurde von der
+  Verdichtung nicht ersetzt (geprüft: weder Nachricht 941 noch 947 steht unter den
+  ersetzten Nachrichten). Er behauptete weiter „81,1 %". Das Modell glaubte ihm und
+  verdichtete um 02:09 ein zweites Mal (50.763 Token), nach einem Fehlversuch mit
+  `turns=1` gegen die Arbeitsfenster-Regel.
+
+Entscheidung des Menschen, 2026-11-06, auf den Vorschlag „Mahnung weg, Befehl fest und ohne
+Zahlen, Wächter verdichtet selbst, nur einmal je Überschreitung": *„gut so"*.
+
+Gebaut in `0.2.1-trunk.28`: `boundaryCommandText()` ohne Parameter und ohne Ziffer
+(`test/nudge-ruhe.test.mjs`); `volume-nudge` liefert nur noch bei `verdict.kind ===
+'compact'` Text; `nudgeRatio` bleibt als Schlüssel bestehen, sendet aber nichts mehr.
+
