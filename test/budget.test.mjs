@@ -70,3 +70,15 @@ test('der Satz für das Log nennt beide Prozentzahlen und die Grenze', () => {
   assert.equal(sentence.includes('86% of the 1000000-token window'), true)
   assert.equal(sentence.includes('boundary at 665913 tokens'), true)
 })
+
+// Entscheidung des Menschen 2026-11-09 („dann a)“): die Grenze liegt bei 85 % des Anfrage-Budgets.
+// Sitzung a856b862: Fenster 512.000, Reserve 65.536, Sicherheit 4.096 -> Budget 442.368.
+test('ohne gültige Vorgabe gilt 0,85 des Anfrage-Budgets (Sitzung a856b862: Grenze bei 376.012 Token)', () => {
+  const policy = { boundaryRatio: 0, nudgeRatio: 0.75, safetyTokens: 4096 } // 0 fällt auf die Vorgabe zurück
+  const at = judgeBudget({ promptTokens: 376012, windowTokens: 512000, reserveTokens: 65536 }, policy)
+  assert.equal(at.budgetTokens, 442368)
+  assert.equal(at.thresholdTokens, 376012) // floor(0.85 * 442368)
+  assert.equal(at.kind, 'compact')
+  const below = judgeBudget({ promptTokens: 376011, windowTokens: 512000, reserveTokens: 65536 }, policy)
+  assert.notEqual(below.kind, 'compact')
+})

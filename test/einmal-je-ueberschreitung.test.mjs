@@ -62,7 +62,9 @@ test('Zug-Ende: eine Überschreitung, zwei Zug-Enden -> genau eine Verdichtung',
   await h.fire('agent/status', { agent: h.agent, status: 'idle' })
   await h.tick()
   assert.equal(h.state.cuts, 1, 'für dieselbe Überschreitung kein zweiter Schnitt')
-  assert.equal(h.state.notes.some((n) => n.includes('not again')), true)
+  // Seit 2026-11-09 („2 Ja“): für dieselbe Überschreitung gibt es keinen zweiten turn-basierten
+  // Schnitt, aber die harte Stufe (Rettung des Kerns) wird versucht; das Log sagt es.
+  assert.equal(h.state.notes.some((n) => n.includes('hard stage')), true)
 })
 
 test('nach einer Messung unter der Grenze geht die Sperre wieder auf', async () => {

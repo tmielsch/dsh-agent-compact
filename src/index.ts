@@ -61,7 +61,7 @@ export const Config: Schema<Config> = Schema.object({
   // minus Antwort-Reserve minus Sicherheit —, nicht gegen das nackte Fenster:
   // sonst liegt sie über der Grenze, an der der Anbieter schon ablehnt (gemessen:
   // 256.000 Reserve im 1.000.000-Fenster ergibt nur 739.904 Token Prompt-Budget).
-  boundaryRatio: Schema.number().default(0.9).description('Hard boundary: at this share of the REQUEST budget (window minus safety minus the answer reserve) the plugin compacts, no matter what. The share of the visible window depends on the configured answer reserve: with maxTokens 256000 in a 1000000 window the boundary is ~67% of the window, with 65536 it is ~84%. Set 0 to disable the guard.'),
+  boundaryRatio: Schema.number().default(0.85).description('Hard boundary: at this share of the REQUEST budget (window minus safety minus the answer reserve) the plugin compacts, no matter what. The share of the visible window depends on the configured answer reserve: with maxTokens 256000 in a 1000000 window the boundary is ~67% of the window, with 65536 it is ~84%. Set 0 to disable the guard.'),
   nudgeRatio: Schema.number().default(0.75).description('Kept for compatibility; sends no text any more (since trunk.28). The model hears something only at boundaryRatio, as a fixed command without numbers.'),
   boundarySafetyTokens: Schema.number().default(4096).description('Room kept free below the context window, so a request never sits exactly on the provider limit.'),
   compactMidTurn: Schema.boolean().default(true).description('Hold the boundary between steps of a running turn as well. Never before the FIRST step of a turn: that is where the kernel used to replace the answer with a compaction (the human forbade it on 2026-10-30).'),
@@ -252,7 +252,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   const budgetPolicy: BudgetPolicy = {
-    boundaryRatio: typeof config.boundaryRatio === 'number' ? config.boundaryRatio : 0.9,
+    boundaryRatio: typeof config.boundaryRatio === 'number' ? config.boundaryRatio : 0.85,
     nudgeRatio: typeof config.nudgeRatio === 'number' ? config.nudgeRatio : 0.75,
     safetyTokens: typeof config.boundarySafetyTokens === 'number' ? config.boundarySafetyTokens : 4096,
   }
@@ -470,10 +470,32 @@ export function apply(ctx: Context, config: Config) {
       const session = (a as unknown as { session: SessionLike & TrunkSessionLike }).session
       const table = turnTableOf(session)
       if (!table) return null
-      const rows = planRows(table, keepTurnsOf(), 1)
-      if (!rows.length) return null
-      const row = rows[0]
-      return { startSeq: row.startSeq, endSeq: row.endSeq, turns: row.k, grossTokens: row.grossTokens }
+      // Gemessen in Sitzung a856b862 (2026-11-09): die erste Zeile der Turn-Tabelle kann auf
+      // dem Systemkopf beginnen (der Kopf wurde in einem Zug neu geschrieben und liegt
+      // damit in dessen Gruppe). Der Kern lehnt so einen Schnitt ab; 16 Versuche in
+      // einer Stunde scheiterten daran. Wie das Werkzeug (`context_compact`, turns=N)
+      // nimmt der Guard den Kopf deshalb aus der Spanne und weicht, wenn danach nichts
+      // übrig bleibt, auf die nächstkleinere Zeile aus.
+      const nodes = surfaceEvents(session)
+      // Kopf = alle `system/message`-Knoten am Anfang (dieselbe Zählung wie `systemHeadCount`).
+      let headCount = 0
+      while (headCount < nodes.length && String(nodes[headCount].type ?? '') === 'system/message') headCount++
+      const rows = planRows(table, keepTurnsOf(), 1000)
+      for (const row of rows) {
+        const si = nodes.findIndex((n) => n.seq === row.startSeq)
+        const ei = nodes.findIndex((n) => n.seq === row.endSeq)
+        if (si < 0 || ei < si) continue
+        let shifted: number
+        try {
+          shifted = offSystemHead(si, ei, headCount)
+        } catch (e) {
+          continue
+        }
+        const startSeq = nodes[shifted].seq
+        // grossTokens dient nur dem Log (obere Schätzung); die echte Freigabe misst der Kern.
+        return { startSeq, endSeq: row.endSeq, turns: row.k, grossTokens: row.grossTokens }
+      }
+      return null
     }
     const engineFor = (a: GuardAgent): (CompactionLike & CompactionGuardLike) | null => {
       const engine = resolveService(a as unknown as AgentLike, 'compaction') as (CompactionLike & CompactionGuardLike) | undefined
