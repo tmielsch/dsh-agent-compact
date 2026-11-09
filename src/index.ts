@@ -470,10 +470,32 @@ export function apply(ctx: Context, config: Config) {
       const session = (a as unknown as { session: SessionLike & TrunkSessionLike }).session
       const table = turnTableOf(session)
       if (!table) return null
-      const rows = planRows(table, keepTurnsOf(), 1)
-      if (!rows.length) return null
-      const row = rows[0]
-      return { startSeq: row.startSeq, endSeq: row.endSeq, turns: row.k, grossTokens: row.grossTokens }
+      // Gemessen in Sitzung a856b862 (2026-11-09): die erste Zeile der Turn-Tabelle kann auf
+      // dem Systemkopf beginnen (der Kopf wurde in einem Zug neu geschrieben und liegt
+      // damit in dessen Gruppe). Der Kern lehnt so einen Schnitt ab; 16 Versuche in
+      // einer Stunde scheiterten daran. Wie das Werkzeug (`context_compact`, turns=N)
+      // nimmt der Guard den Kopf deshalb aus der Spanne und weicht, wenn danach nichts
+      // übrig bleibt, auf die nächstkleinere Zeile aus.
+      const nodes = surfaceEvents(session)
+      // Kopf = alle `system/message`-Knoten am Anfang (dieselbe Zählung wie `systemHeadCount`).
+      let headCount = 0
+      while (headCount < nodes.length && String(nodes[headCount].type ?? '') === 'system/message') headCount++
+      const rows = planRows(table, keepTurnsOf(), 1000)
+      for (const row of rows) {
+        const si = nodes.findIndex((n) => n.seq === row.startSeq)
+        const ei = nodes.findIndex((n) => n.seq === row.endSeq)
+        if (si < 0 || ei < si) continue
+        let shifted: number
+        try {
+          shifted = offSystemHead(si, ei, headCount)
+        } catch (e) {
+          continue
+        }
+        const startSeq = nodes[shifted].seq
+        // grossTokens dient nur dem Log (obere Schätzung); die echte Freigabe misst der Kern.
+        return { startSeq, endSeq: row.endSeq, turns: row.k, grossTokens: row.grossTokens }
+      }
+      return null
     }
     const engineFor = (a: GuardAgent): (CompactionLike & CompactionGuardLike) | null => {
       const engine = resolveService(a as unknown as AgentLike, 'compaction') as (CompactionLike & CompactionGuardLike) | undefined

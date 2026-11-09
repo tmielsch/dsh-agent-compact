@@ -75,42 +75,98 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
     return typeof id === 'string' && id ? id : 'unknown-session'
   }
 
-  async function forceCompact(agent: GuardAgent, why: string, signal?: AbortSignal): Promise<boolean> {
+  // Zwei Stufen, je Zug und Stufe höchstens ein Versuch (Entscheidung des Menschen
+  // 2026-11-09: „3 ja einen“). Gemessen in Sitzung a856b862: 19 Versuche in einer Stunde,
+  // weil jeder Schritt von vorn anfing, nachdem der erste Versuch gescheitert war.
+  //   Stufe 1: der turn-basierte Schnitt, der das Arbeitsfenster (keepTurns) respektiert.
+  //   Stufe 2: die Rettung des Kerns (`compactIfNeeded`, Trigger `context-overflow`). Sie
+  //            kennt kein Arbeitsfenster, ist also hart und verlustbehaftet — die Sitzung
+  //            verliert lieber die jüngsten Züge, als dass sie stirbt (Entscheidung des
+  //            Menschen 2026-11-09: „2 Ja“).
+  interface Attempts { turn: number | undefined; stage1: boolean; stage2: boolean }
+  const attempts = new Map<string, Attempts>()
+
+  function attemptsFor(agent: GuardAgent, turn: number | undefined): Attempts {
+    const key = sessionKey(agent)
+    const known = attempts.get(key)
+    if (known && turn !== undefined && known.turn === turn) return known
+    const fresh: Attempts = { turn, stage1: false, stage2: false }
+    attempts.set(key, fresh)
+    return fresh
+  }
+
+  async function forceCompact(
+    agent: GuardAgent,
+    why: string,
+    signal?: AbortSignal,
+    turn?: number,
+    onlyHard = false,
+  ): Promise<boolean> {
     const key = sessionKey(agent)
     if (inFlight.has(key)) {
       callbacks.note('info', 'compaction guard: a compaction is already running for this session; skipped (' + why + ')')
       return false
     }
+    const tried = attemptsFor(agent, turn)
     inFlight.add(key)
     try {
-      const cut = callbacks.planCut(agent)
-      if (cut) {
-        const done = await callbacks.compactCut(agent, cut, signal)
-        if (done) {
-          callbacks.note(
-            'info',
-            'compaction guard (' + why + '): compacted ' + cut.turns + ' finished turn(s), range ' + cut.startSeq + '..' + cut.endSeq +
-              ', freed ' + (typeof done.freedTokens === 'number' ? done.freedTokens : '?') + ' tokens',
-          )
-          return true
+      if (!onlyHard && !tried.stage1) {
+        tried.stage1 = true
+        try {
+          const cut = callbacks.planCut(agent)
+          if (cut) {
+            const done = await callbacks.compactCut(agent, cut, signal)
+            if (done) {
+              callbacks.note(
+                'info',
+                'compaction guard (' + why + '): compacted ' + cut.turns + ' finished turn(s), range ' + cut.startSeq + '..' + cut.endSeq +
+                  ', freed ' + (typeof done.freedTokens === 'number' ? done.freedTokens : '?') + ' tokens',
+              )
+              settle(agent, tried)
+              return true
+            }
+          } else {
+            callbacks.note('info', 'compaction guard (' + why + '): no turn-based cut is allowed here, going to the hard stage')
+          }
+        } catch (error) {
+          callbacks.note('warn', 'compaction guard (' + why + ') stage 1 failed: ' + (error instanceof Error ? error.message : String(error)) + ' — going to the hard stage')
         }
       }
-      const emergency = await callbacks.compactEmergency(agent, signal)
-      if (emergency) {
-        callbacks.note(
-          'info',
-          'compaction guard (' + why + '): no turn-based cut was allowed, the engine compacted the oldest safe range, freed ' +
-            (typeof emergency.freedTokens === 'number' ? emergency.freedTokens : '?') + ' tokens',
-        )
-        return true
+      if (tried.stage2) {
+        callbacks.note('warn', 'compaction guard (' + why + '): both stages were already tried in this turn, not again')
+        return false
       }
-      callbacks.note('warn', 'compaction guard (' + why + '): no compactable range was found')
-      return false
-    } catch (error) {
-      callbacks.note('warn', 'compaction guard (' + why + ') failed: ' + (error instanceof Error ? error.message : String(error)))
+      tried.stage2 = true
+      try {
+        const emergency = await callbacks.compactEmergency(agent, signal)
+        if (emergency) {
+          callbacks.note(
+            'info',
+            'compaction guard (' + why + '): hard stage, the engine compacted the oldest safe range without a working window, freed ' +
+              (typeof emergency.freedTokens === 'number' ? emergency.freedTokens : '?') + ' tokens',
+          )
+          settle(agent, tried)
+          return true
+        }
+        callbacks.note('warn', 'compaction guard (' + why + '): no compactable range was found')
+      } catch (error) {
+        callbacks.note('warn', 'compaction guard (' + why + ') hard stage failed: ' + (error instanceof Error ? error.message : String(error)))
+      }
       return false
     } finally {
       inFlight.delete(key)
+    }
+  }
+
+  // Nach einer gelungenen Verdichtung, die die Belegung unter die Grenze gebracht hat, ist
+  // das Problem gelöst: die Versuche zählen wieder von vorn. Liegt sie noch darüber, bleiben
+  // die Stufen verbraucht, und der nächste Schritt eskaliert statt zu wiederholen.
+  function settle(agent: GuardAgent, tried: Attempts): void {
+    const after = callbacks.reading(agent)
+    const verdict = after ? judgeBudget(after, policy) : null
+    if (verdict && verdict.kind !== 'compact') {
+      tried.stage1 = false
+      tried.stage2 = false
     }
   }
 
@@ -143,22 +199,26 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
   // Lage 3a: die nächste Anfrage würde abgelehnt — vor dem Schritt verdichten.
   disposers.push(onWaterfall('agent/pre-step', async (payload, next) => {
     try {
-      const { agent, signal, step } = (payload ?? {}) as { agent?: GuardAgent; signal?: AbortSignal; step?: number }
+      const { agent, signal, step, turn } = (payload ?? {}) as { agent?: GuardAgent; signal?: AbortSignal; step?: number; turn?: number }
       if (agent) {
         const judged = verdictFor(agent)
         if (judged) {
           const overflow = wouldOverflow(judged.reading, policy.safetyTokens)
           const firstStepOfTurn = typeof step === 'number' && step <= 1
           const overBoundary = judged.verdict.kind === 'compact'
-          const midTurn = overBoundary && options.compactMidTurn && !firstStepOfTurn && !spent.has(sessionKey(agent))
+          const alreadySpent = spent.has(sessionKey(agent))
+          const midTurn = overBoundary && options.compactMidTurn && !firstStepOfTurn
           if (overflow || midTurn) {
             callbacks.note(
               'info',
               'compaction guard: ' + budgetSentence(judged.reading, judged.verdict) +
                 (overflow ? ' — the next request would be rejected, compacting before it' : ' — over the boundary mid-turn'),
             )
+            // Ist für diese Überschreitung schon einmal verdichtet worden und die Belegung liegt
+            // trotzdem noch darüber, greift nur die harte Stufe (Entscheidung 2026-11-09).
+            const onlyHard = !overflow && alreadySpent
             if (!overflow) spent.add(sessionKey(agent))
-            await forceCompact(agent, overflow ? 'overflow prevention' : 'turn boundary', signal)
+            await forceCompact(agent, overflow ? 'overflow prevention' : onlyHard ? 'turn boundary, hard stage' : 'turn boundary', signal, turn, onlyHard)
           }
         }
       }
@@ -176,15 +236,14 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
       retried.delete(sessionKey(agent))
       const judged = verdictFor(agent)
       if (!judged || judged.verdict.kind !== 'compact') return
-      if (spent.has(sessionKey(agent))) {
-        callbacks.note('info', 'compaction guard at turn end: already compacted for this crossing of the boundary, not again (' + budgetSentence(judged.reading, judged.verdict) + ')')
-        return
-      }
-      callbacks.note('info', 'compaction guard at turn end: ' + budgetSentence(judged.reading, judged.verdict))
+      // Ist für diese Überschreitung schon verdichtet worden und die Belegung liegt noch
+      // immer über der Grenze, greift die harte Stufe (Entscheidung 2026-11-09: „2 Ja“).
+      const onlyHard = spent.has(sessionKey(agent))
+      callbacks.note('info', 'compaction guard at turn end' + (onlyHard ? ' (still over the boundary after an earlier compaction, hard stage)' : '') + ': ' + budgetSentence(judged.reading, judged.verdict))
       spent.add(sessionKey(agent))
       // Nicht auf die Verdichtung warten: der Zug ist zu Ende, und ein hängender
       // Ereignis-Hörer würde den nächsten Zug blockieren.
-      void forceCompact(agent, 'turn end')
+      void forceCompact(agent, onlyHard ? 'turn end, hard stage' : 'turn end', undefined, undefined, onlyHard)
     } catch (error) {
       callbacks.note('warn', 'compaction guard idle check failed: ' + (error instanceof Error ? error.message : String(error)))
     }
@@ -206,7 +265,7 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
       if (already !== undefined && already === turn) return next()
       retried.set(key, typeof turn === 'number' ? turn : -1)
       callbacks.note('warn', 'compaction guard: the provider rejected the request for context overflow; compacting once and retrying the request')
-      const done = await forceCompact(agent, 'context overflow recovery', signal)
+      const done = await forceCompact(agent, 'context overflow recovery', signal, typeof turn === 'number' ? turn : undefined)
       return done ? { kind: 'retry' } : next()
     } catch (error) {
       callbacks.note('warn', 'compaction guard overflow recovery failed: ' + (error instanceof Error ? error.message : String(error)))

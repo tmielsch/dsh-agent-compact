@@ -252,17 +252,35 @@ Alle Zeiten Ortszeit (Log in UTC, +1 Stunde). Quelle: das entpackte Sitzungsprot
 Nicht geprüft (SCHÄTZUNG): dass `compactEmergency` an dieser Stelle gelungen wäre. Es wählt
 seinen Bereich selbst und hat eigene Regeln; erst ein Lauf zeigt es.
 
-### 9.4 Offene Fragen an den Menschen (vor dem Bau zu klären)
+### 9.4 Antworten des Menschen (2026-11-09, ~22:05) und Stand
 
-1. Bezugsgröße der 85 %: Anfrage-Budget (wie heute; in dieser Sitzung 376.013 Token, in der
-   Fensteranzeige 73,4 %) oder Fensteranzeige (435.200 Token, im Budget 98,4 %).
-2. Zweite Stufe („immer, hart, lossy"): darf sie auch dann verdichten, wenn die Sperre `spent`
-   für diese Überschreitung schon gesetzt ist, und darf sie das Arbeitsfenster (`keepTurns`)
-   opfern, wenn sonst nichts mehr geht?
-3. Anzahl und Rhythmus: nach einem fehlgeschlagenen Versuch soll der Guard nicht in jedem
-   Schritt neu anfangen. Vorschlag: höchstens ein Versuch je Zug und je Stufe.
+Antwort auf die drei Fragen, wörtlich: *„90% vom gesamtbudget. 2. Ja 3 ja einen"*
 
-Der Bau beginnt nach der Antwort. Dann gehören dazu: `offSystemHead` im Guard, Übergang zur
-Rettung nach einem geworfenen Fehler, Rückzugsregel für wiederholte Fehlschläge,
-`boundaryRatio` 0,85, Tests in `test/compaction-guard.test.mjs`.
+1. **Bezugsgröße: ungeklärt.** Der Satz „90% vom gesamtbudget" nennt 90 %, während der Mensch
+   kurz davor „90 ist zu viel. 85." gesagt hat; und „Gesamtbudget" kann das Anfrage-Budget
+   (Fenster minus Antwort-Reserve minus Sicherheitsabstand, so rechnet der Wächter heute) oder
+   das ganze Fenster meinen. Der Wächter bleibt deshalb bei den heutigen Werten
+   (`boundaryRatio` 0,9 vom Anfrage-Budget). Rückfrage an den Menschen steht offen (9.5).
+2. **Zweite Stufe: ja.** Sie verdichtet auch dann, wenn die Sperre `spent` für diese
+   Überschreitung schon gesetzt ist, und sie darf das Arbeitsfenster opfern (Rettung des Kerns,
+   `compactIfNeeded` mit Trigger `context-overflow`, kennt kein `keepTurns`).
+3. **Versuche: einen.** Je Zug und Stufe höchstens ein Versuch.
 
+### 9.5 Gebaut (Zweig `feature/zwangs-grenze`, noch nicht gemergt, nicht installiert)
+
+- `offSystemHead` im Wächter (`src/index.ts`, `cutOf`): der Kopf wird aus der Spanne genommen,
+  Zeilen, die danach leer wären, werden übersprungen. Das ist die Ursache aus 9.3 Punkt 1.
+- Zwei Stufen in `forceCompact` (`src/compaction-guard.ts`): erst der turn-basierte Schnitt,
+  danach — auch nach einem **geworfenen Fehler** — die Rettung des Kerns. Je Zug und Stufe ein
+  Versuch; nach einer Verdichtung, die die Belegung unter die Grenze bringt, zählen die Versuche
+  von vorn; bleibt die Belegung darüber, eskaliert der nächste Schritt zur harten Stufe.
+- Die Sperre „einmal je Überschreitung" (Entscheidung 2026-11-06) sperrt nur noch die erste
+  Stufe; die harte Stufe läuft auch nach gesetzter Sperre (Punkt 2).
+- Tests: `test/harte-stufe.test.mjs` (7 neu), `test/einmal-je-ueberschreitung.test.mjs` angepasst
+  (die Meldung „not again“ heißt jetzt „hard stage“). 213 Tests grün (`npm run build`, dann
+  `node --test test/*.test.mjs`). Das ist eine MESSUNG an Nachbildungen des Harness; ein Lauf in
+  einer echten Sitzung (A2 bis A4) steht aus.
+
+Offene Frage 9.5: Welche Zahl und welche Bezugsgröße gilt für die Grenze? Optionen: (a) 0,85 vom
+Anfrage-Budget, (b) 0,90 vom Anfrage-Budget (heute), (c) 0,90 vom ganzen Fenster, (d) zwei
+Stufen: 0,85 für die normale Verdichtung und 0,90 für die harte Stufe.
