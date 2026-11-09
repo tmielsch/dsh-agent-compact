@@ -284,3 +284,13 @@ Antwort auf die drei Fragen, wörtlich: *„90% vom gesamtbudget. 2. Ja 3 ja ein
 Offene Frage 9.5: Welche Zahl und welche Bezugsgröße gilt für die Grenze? Optionen: (a) 0,85 vom
 Anfrage-Budget, (b) 0,90 vom Anfrage-Budget (heute), (c) 0,90 vom ganzen Fenster, (d) zwei
 Stufen: 0,85 für die normale Verdichtung und 0,90 für die harte Stufe.
+
+### 9.6 Entscheidung des Menschen zur Grenze (2026-11-09, ~22:15)
+
+Auf die Frage nach Zahl und Bezugsgröße (Möglichkeiten a bis d): *„dann a)“*. Das ist **85 %
+vom Anfrage-Budget** (Fenster minus Antwort-Reserve minus Sicherheitsabstand). Gebaut:
+`boundaryRatio` 0,85 als Vorgabe in `src/index.ts` (Schema und Rückfallwert), `src/budget.ts`
+(`clampRatio`) und `README.md`. Die Grenze der Sitzung a856b862 läge damit bei 376.012 Token
+(floor von 0,85 mal 442.368; MESSUNG im Test `test/budget.test.mjs`, letzter Test). Der
+Befehl an das Modell (R6) erscheint ebenfalls bei 85 %, denn er hängt an derselben Grenze.
+`nudgeRatio` (0,75) sendet weiterhin nichts.

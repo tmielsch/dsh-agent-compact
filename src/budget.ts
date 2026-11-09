@@ -12,7 +12,7 @@
 
 /** Vorgaben der Grenze. Alle Werte sind Token bzw. Anteile (0..1). */
 export interface BudgetPolicy {
-  /** Anteil des nutzbaren Promp-Budgets, ab dem verdichtet wird (Vorgabe 0,9). */
+  /** Anteil des nutzbaren Promp-Budgets, ab dem verdichtet wird (Vorgabe 0,85, Entscheidung 2026-11-09). */
   boundaryRatio: number
   /** Anteil, ab dem das Modell den Befehl zu verdichten bekommt (Vorgabe 0,75). */
   nudgeRatio: number
@@ -100,7 +100,7 @@ export function wouldOverflow(reading: BudgetReading, safetyTokens: number): boo
 }
 
 function clampRatio(value: number): number {
-  if (!Number.isFinite(value) || value <= 0) return 0.9
+  if (!Number.isFinite(value) || value <= 0) return 0.85
   return Math.min(1, value)
 }
 

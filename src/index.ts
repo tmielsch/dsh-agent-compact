@@ -61,7 +61,7 @@ export const Config: Schema<Config> = Schema.object({
   // minus Antwort-Reserve minus Sicherheit —, nicht gegen das nackte Fenster:
   // sonst liegt sie über der Grenze, an der der Anbieter schon ablehnt (gemessen:
   // 256.000 Reserve im 1.000.000-Fenster ergibt nur 739.904 Token Prompt-Budget).
-  boundaryRatio: Schema.number().default(0.9).description('Hard boundary: at this share of the REQUEST budget (window minus safety minus the answer reserve) the plugin compacts, no matter what. The share of the visible window depends on the configured answer reserve: with maxTokens 256000 in a 1000000 window the boundary is ~67% of the window, with 65536 it is ~84%. Set 0 to disable the guard.'),
+  boundaryRatio: Schema.number().default(0.85).description('Hard boundary: at this share of the REQUEST budget (window minus safety minus the answer reserve) the plugin compacts, no matter what. The share of the visible window depends on the configured answer reserve: with maxTokens 256000 in a 1000000 window the boundary is ~67% of the window, with 65536 it is ~84%. Set 0 to disable the guard.'),
   nudgeRatio: Schema.number().default(0.75).description('Kept for compatibility; sends no text any more (since trunk.28). The model hears something only at boundaryRatio, as a fixed command without numbers.'),
   boundarySafetyTokens: Schema.number().default(4096).description('Room kept free below the context window, so a request never sits exactly on the provider limit.'),
   compactMidTurn: Schema.boolean().default(true).description('Hold the boundary between steps of a running turn as well. Never before the FIRST step of a turn: that is where the kernel used to replace the answer with a compaction (the human forbade it on 2026-10-30).'),
@@ -252,7 +252,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   const budgetPolicy: BudgetPolicy = {
-    boundaryRatio: typeof config.boundaryRatio === 'number' ? config.boundaryRatio : 0.9,
+    boundaryRatio: typeof config.boundaryRatio === 'number' ? config.boundaryRatio : 0.85,
     nudgeRatio: typeof config.nudgeRatio === 'number' ? config.nudgeRatio : 0.75,
     safetyTokens: typeof config.boundarySafetyTokens === 'number' ? config.boundarySafetyTokens : 4096,
   }
