@@ -186,3 +186,83 @@ Gebaut in `0.2.1-trunk.28`: `boundaryCommandText()` ohne Parameter und ohne Ziff
 (`test/nudge-ruhe.test.mjs`); `volume-nudge` liefert nur noch bei `verdict.kind ===
 'compact'` Text; `nudgeRatio` bleibt als Schlüssel bestehen, sendet aber nichts mehr.
 
+## 9. Nachtrag 2026-11-09: die Zwangs-Verdichtung scheitert still und wiederholt sich
+
+### 9.1 Anordnung des Menschen (seine Worte)
+
+- 2026-11-09, ~21:40: *„Eben ist es leider Gottes passiert, dass eine Session mehrfach
+  hintereinander Compaction halt verschoben hat. Immer weiter, bis sie bei 92% gelandet war
+  […] Und das ist vom Ding her auch in Ordnung, aber es muss halt eine harte Grenze geben.
+  Das heißt, bei 90% gibt es eine Zwangs-Compaction. Da kann, da wird dann quasi das
+  originale Tool aufgerufen und es wird einfach hart compacted lossy. So, immer. Weil das
+  muss sein, um die Session zu retten."*
+- 2026-11-09, ~21:55, zur Sitzung `a856b862-d0ef-4b53-b12e-a674a3a00c2c`: *„Zugegebenermaßen,
+  als ich sie unterbrochen hatte, war es halt 92% und sie hing da aber schon für Ewigkeiten.
+  […] Aber ja, 90 ist zu viel. 85. Weil wenn dann da irgendwas, ne, sagen wir mal, das ist ein
+  super komplexes Thema und die Compaction danach ist 80.000 lang. So, um quasi 400.000
+  sinnvoll zu erhalten. Also, es geht eh nicht mehr als 64.000 auf einmal, aber nachher ist
+  sie so lang und es gibt nicht mehr genug Kontext, um die Compaction zu schreiben so und dann
+  ist die Session gebricht quasi. Man müsste dann Rollback machen so und das ist mal richtig
+  painful hier in DSH. Es gibt kein richtiges Tool dafür."*
+
+Daraus: die Grenze liegt bei **85 %** statt 90 % (`boundaryRatio` 0,85). Worauf sich die 85 %
+beziehen (Anfrage-Budget oder Fensteranzeige) und die zweite Stufe sind in 9.4 als offene
+Fragen festgehalten, nicht entschieden.
+
+### 9.2 Gemessener Hergang (Sitzung `a856b862-…`, VST-Dev, Route `pcserve/swift-1.5-iq2_xs`)
+
+Alle Zeiten Ortszeit (Log in UTC, +1 Stunde). Quelle: das entpackte Sitzungsprotokoll
+`session.v4.jsonl.zstd`, Ereignisse `assistant/message` (`usage.totalTokens`),
+`compaction/start`, `compaction/end`, `request/header`, `request/context`.
+
+1. Fenster 512.000 (`request/context`, seq 1567), Antwort-Reserve 65.536 (`request/header`,
+   `maxTokens`), `safetyTokens` 4.096 → Prompt-Budget 442.368; Grenze bei 0,9 = 398.131.
+   (MESSUNG, Rechnung aus den Kopfzahlen der Sitzung.)
+2. Ab 20:24 (Zug 105, Schritt 1) liegt der Prompt bei 447.352 Token, also **über dem Budget**
+   (101 %). Von da an steht `wouldOverflow` auf wahr: der Guard darf (Lage 3a) in **jedem**
+   Schritt verdichten und setzt dabei die Sperre `spent` **nicht**.
+3. Von 20:24 bis 21:29 begann der Guard **19 Verdichtungen**, **16 scheiterten** mit „surface
+   replace: node 0 holds the system prompt …" (die Sperre `compaction-guard-head` des Profils
+   verweigert sie, bevor etwas geschrieben wird), **3 endeten mit „Request was aborted"**
+   (Züge 105, 106 und 107; die beiden letzten beginnen eine Sekunde nach dem Zugstart; dass der
+   Mensch sie abgebrochen hat, ist eine SCHÄTZUNG, das Protokoll nennt den Grund nicht).
+   Jeder Versuch dauerte zwei bis sechs Minuten, die Gesamtzeit beträgt rund eine Stunde. Der Prompt wuchs in
+   dieser Zeit von 447.352 auf 490.008 Token (Anzeige: 92 % bis 96 % des Fensters).
+4. Eine erfolgreiche Verdichtung fand erst um 21:33:57 statt, und zwar durch den **Aufruf des
+   Modells** (`context_compact` mit `turns=6`, `keep_turns=1`), nicht durch den Guard. Danach lag
+   der Prompt bei 85.934 Token. Auch die früheren Fehlschläge (15:53, 19:21 Zug 104) tragen
+   dieselbe Meldung.
+5. Die 92 %, die du gesehen hast, sind 471.377 ÷ 512.000 = 92,1 % des Fensters, gegen das
+   Anfrage-Budget aber 106,6 %. (MESSUNG.)
+
+### 9.3 Ursache (gelesen im Quelltext, `src/index.ts`, `src/compaction-guard.ts`)
+
+1. Der Guard plant seinen Schnitt in `cutOf` (index.ts Z. 470) mit `planRows` und nimmt den
+   Anfang der ersten Zeile unverändert. Das Werkzeug `context_compact` ruft vor demselben
+   Schnitt `offSystemHead` auf (index.ts Z. 766, seit trunk.27), der Guard **nicht**. Beginnt
+   die erste Zeile der Turn-Tabelle auf dem Systemprompt, lehnt die Sperre den Schnitt ab.
+2. `forceCompact` (compaction-guard.ts Z. 78 bis 115) fängt den Fehler von `compactCut` im
+   äußeren `catch` ab und gibt `false` zurück. Die Rettung des Kerns (`compactEmergency`) wird
+   nur versucht, wenn `planCut` gar keinen Schnitt liefert oder `compactCut` `null` meldet,
+   **nie nach einem geworfenen Fehler**.
+3. Lage 3a (Überlauf) wiederholt sich deshalb in jedem Schritt, ohne Sperre und ohne
+   Rückzug; jeder Versuch lässt das Modell zwei bis sechs Minuten einen Zusammenfassungstext
+   schreiben, der danach verworfen wird.
+
+Nicht geprüft (SCHÄTZUNG): dass `compactEmergency` an dieser Stelle gelungen wäre. Es wählt
+seinen Bereich selbst und hat eigene Regeln; erst ein Lauf zeigt es.
+
+### 9.4 Offene Fragen an den Menschen (vor dem Bau zu klären)
+
+1. Bezugsgröße der 85 %: Anfrage-Budget (wie heute; in dieser Sitzung 376.013 Token, in der
+   Fensteranzeige 73,4 %) oder Fensteranzeige (435.200 Token, im Budget 98,4 %).
+2. Zweite Stufe („immer, hart, lossy"): darf sie auch dann verdichten, wenn die Sperre `spent`
+   für diese Überschreitung schon gesetzt ist, und darf sie das Arbeitsfenster (`keepTurns`)
+   opfern, wenn sonst nichts mehr geht?
+3. Anzahl und Rhythmus: nach einem fehlgeschlagenen Versuch soll der Guard nicht in jedem
+   Schritt neu anfangen. Vorschlag: höchstens ein Versuch je Zug und je Stufe.
+
+Der Bau beginnt nach der Antwort. Dann gehören dazu: `offSystemHead` im Guard, Übergang zur
+Rettung nach einem geworfenen Fehler, Rückzugsregel für wiederholte Fehlschläge,
+`boundaryRatio` 0,85, Tests in `test/compaction-guard.test.mjs`.
+
