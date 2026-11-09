@@ -266,7 +266,7 @@ Antwort auf die drei Fragen, wörtlich: *„90% vom gesamtbudget. 2. Ja 3 ja ein
    `compactIfNeeded` mit Trigger `context-overflow`, kennt kein `keepTurns`).
 3. **Versuche: einen.** Je Zug und Stufe höchstens ein Versuch.
 
-### 9.5 Gebaut (Zweig `feature/zwangs-grenze`, noch nicht gemergt, nicht installiert)
+### 9.5 Gebaut (Version `0.2.1-trunk.30`, Commit 317ee17, Release veröffentlicht, im Profil `web` installiert; Neustart von `dsh web` am 2026-11-09 gegen 22:45)
 
 - `offSystemHead` im Wächter (`src/index.ts`, `cutOf`): der Kopf wird aus der Spanne genommen,
   Zeilen, die danach leer wären, werden übersprungen. Das ist die Ursache aus 9.3 Punkt 1.
@@ -294,3 +294,17 @@ vom Anfrage-Budget** (Fenster minus Antwort-Reserve minus Sicherheitsabstand). G
 (floor von 0,85 mal 442.368; MESSUNG im Test `test/budget.test.mjs`, letzter Test). Der
 Befehl an das Modell (R6) erscheint ebenfalls bei 85 %, denn er hängt an derselben Grenze.
 `nudgeRatio` (0,75) sendet weiterhin nichts.
+
+### 9.7 Stand der Abnahme (2026-11-09, ~22:50)
+
+- Gemessen: Release `v0.2.1-trunk.30` im Repo `tmielsch/dsh-agent-compact`, Paket SHA-256
+  `397d2f74b2de1ea74a7248c47655f2e7a8935841f34fca7362c340ba34988a77`; installiert in
+  `~/.dsh/profiles/web/node_modules/@tmielsch/rolling-compaction` (Version `0.2.1-trunk.30`, 0,85 in
+  `lib/budget.js`, harte Stufe in `lib/compaction-guard.js`); 214 Tests grün. `dsh web` wurde vom
+  Menschen neu gestartet.
+- Ausstehend (A2 bis A4 aus Abschnitt 5): die Sichtprüfung in einer echten Sitzung über der Grenze.
+  Erwartung: kein `compaction/end` mit `compaction-guard-head`, im Host-Log die Zeilen
+  `compaction guard …` mit `hard stage`, falls die erste Stufe scheitert. Das Ziel der Wächter-Zeilen
+  ist noch nicht gefunden (`~/.dsh/logs` enthält sie nicht); bis dahin ist das Sitzungsprotokoll
+  (`compaction/start`, `compaction/end`) der Beleg.
+- Nicht Teil dieser Spec: Rollen für Facharbeiter (anderes Thema, vom Menschen zurückgestellt).
