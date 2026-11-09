@@ -354,3 +354,14 @@ A6. Regressionstest mit der Lage aus `0b9ffeb1`: `turn/start` vor dem Systemkopf
     Token groß; Plan bei Arbeitsfenster 3 darf keine Zeile über 1.000 Token zeigen. Beleg:
     `node --test test/kopf-im-praefix.test.mjs`.
 A7. Der Plan nennt in derselben Lage den Weg über ein kleineres `keep_turns` mit Zahl.
+
+### 10.5 Gebaut (Version `0.2.1-trunk.31`, noch nicht veröffentlicht)
+
+- `src/turns.ts`, `buildTurnTable`: führende `system/message`-Knoten sind Präfix und gehören zu keinem Zug (R9).
+- `src/turns.ts`, neu `keepTurnsHint`; `src/index.ts`, `context_compact_plan`: der Plan nennt das größte kleinere
+  `keep_turns`, bei dem eine Zeile das Verlangte erreicht, mit `turns=N` und Token (R10). Er senkt das Fenster nicht selbst.
+- `test/kopf-im-praefix.test.mjs` (7 neu): die Lage aus `0b9ffeb1`. 221 Tests grün.
+- An den echten Daten der Sitzung geprüft (Oberfläche aus dem Protokoll nachgebaut, SCHÄTZUNG aus Zeichen): Plan bei
+  Arbeitsfenster 3 zeigt nur `turns=1` ≈ 266 Token (vorher `turns=2` ≈ 76.000); der Hinweis nennt `keep_turns=0`
+  mit `turns=4` ≈ 204.580.
+- Nicht geprüft: das Verhalten des Wächters in einer echten Sitzung mit dieser Lage.

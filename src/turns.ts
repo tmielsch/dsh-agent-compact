@@ -108,6 +108,13 @@ export function buildTurnTable(
     finished: b.endSeq !== null,
   }))
 
+  // Der Systemkopf (führende `system/message`-Knoten) gehört nie zu einem Zug, gleich wo
+  // `turn/start` im Log steht. Gemessen in Sitzung 0b9ffeb1 (2026-11-09): `turn/start` von Zug 1
+  // stand bei seq 6, der Systemprompt bei seq 9; der Kopf (~76.000 Token) zählte damit zu Zug 1,
+  // der Plan bot ihn als freigebbar an (`frees ~67257`), die Engine maß 1857.
+  let headNodes = 0
+  while (headNodes < surfaceNodes.length && surfaceNodes[headNodes].type === 'system/message') headNodes++
+
   let prefixTokens = 0
   let prefixNodes = 0
   let prefixFirst = -1
@@ -119,7 +126,7 @@ export function buildTurnTable(
     const size = tokensBySeq.get(n.seq) ?? 0
     total += size
     let g: TurnGroup | null = null
-    for (let t = 0; t < ordered.length; t++) {
+    for (let t = 0; i >= headNodes && t < ordered.length; t++) {
       const b = ordered[t][1]
       if (n.seq > b.startSeq && (b.endSeq === null || n.seq <= b.endSeq)) {
         g = groups[t]
@@ -245,6 +252,35 @@ export function offSystemHead(startPos: number, endPos: number, headCount: numbe
     )
   }
   return shifted
+}
+
+/**
+ * Was ein kleineres Arbeitsfenster freigeben würde — als Satz für den Plan, oder null.
+ *
+ * Der Plan zeigt nur Zeilen, die das Arbeitsfenster (`keepTurns`) respektieren. Ist keine Zeile
+ * erlaubt oder erreicht die größte `minFreed` nicht, sucht diese Funktion das größte
+ * Arbeitsfenster unterhalb des gewählten, bei dem eine Zeile `minFreed` erreicht (ohne `minFreed`:
+ * irgendeine Zeile mit Inhalt). Sie ändert das Fenster nicht; die Wahl bleibt beim Modell.
+ *
+ * @param table - die Turn-Tabelle der Sitzung.
+ * @param keepTurns - das gewählte Arbeitsfenster.
+ * @param minFreed - gewünschte Mindestfreigabe in Token, falls genannt.
+ * @returns der Hinweis, oder null, wenn kein kleineres Fenster etwas bringt oder nichts fehlt.
+ */
+export function keepTurnsHint(table: TurnTable, keepTurns: number, minFreed?: number): string | null {
+  const want = minFreed && minFreed > 0 ? minFreed : 1
+  const best = planRows(table, keepTurns, 1)[0]
+  if (best && best.grossTokens >= want) return null
+  for (let k = Math.max(0, Math.floor(keepTurns) - 1); k >= 0; k--) {
+    const row = planRows(table, k, 1)[0]
+    if (row && row.grossTokens >= want) {
+      return 'With the working-memory window kept at ' + keepTurns + ' turn(s) the largest cut frees only ~' + (best ? best.grossTokens : 0) +
+        ' tokens. keep_turns=' + k + ' would offer turns=' + row.k + ' freeing ~' + row.grossTokens +
+        ' tokens, at the price of the ' + (keepTurns - k) + ' newest finished turn(s) of working memory. Pass keep_turns=' + k +
+        ' to context_compact_plan to see that row; the window is your decision, the plugin does not lower it by itself.'
+    }
+  }
+  return null
 }
 
 /** The single row for exactly `k` finished turns, or null when it is not allowed. */
