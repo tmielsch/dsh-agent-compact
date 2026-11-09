@@ -25,7 +25,7 @@ import { ForkRegistry, SharedTrunkMemo } from './memo.js'
 import { forkCut, forkParent, lockedSpanError, surfaceEvents } from './trunk.js'
 import { DEFAULT_MAX_CHARS, MAX_CHARS, TrunkArchive, referencedIds, renderRecall, spanArchiveId, splitBlocks, trunkRecallId } from './recall.js'
 import { SummaryStash, keptLabel, type KeptSummary } from './summary-stash.js'
-import { buildTurnTable, planRows, turnCutRow, turnTableText, type TurnLogEvent, type TurnTable } from './turns.js'
+import { buildTurnTable, keepTurnsHint, planRows, turnCutRow, turnTableText, type TurnLogEvent, type TurnTable } from './turns.js'
 import type { AgentLike, OptimizedEngineLike, SessionLike, SurfaceNode, TrunkDeps } from './optimizer.js'
 import type { TrunkSessionLike } from './trunk.js'
 
@@ -1089,8 +1089,9 @@ export function apply(ctx: Context, config: Config) {
         'Turn table: ' + table.totalSurfaceTokens + ' tokens on the surface, ' + finished + ' finished turn(s)' +
         (running > 0 ? ' plus ' + running + ' running turn (never compactable)' : '') +
         '. Working-memory window: the newest ' + keep + ' finished turn(s) stay untouched.'
+      const hint = keepTurnsHint(table, keep, minFreed)
       if (!rows.length) {
-        return { text: head + '\nNothing is safe to compact yet: every finished turn sits inside the working-memory window. Keep working, then measure again when a longer stretch has closed.' }
+        return { text: head + '\nNothing is safe to compact yet: every finished turn sits inside the working-memory window. Keep working, then measure again when a longer stretch has closed.' + (hint ? '\n\n' + hint : '') }
       }
       const lines = rows.map((r) =>
         'turns=' + r.k + ': ' + r.startMarker + ' .. ' + r.endMarker +
@@ -1101,6 +1102,7 @@ export function apply(ctx: Context, config: Config) {
       const deepest = rows[0]
       return {
         text: head + '\n' + lines.join('\n') +
+          (hint ? '\n\n' + hint : '') +
           '\n\nCall context_compact with turns=' + deepest.k + ' (plus your checkpoint as summary) for the largest safe compaction. ' +
           'A bulk compaction folds whole scenes into ONE checkpoint — do not split a finished stretch into several small ones, and do not stop at the last small block. ' +
           'The freed-token number you get back from context_compact is measured by the engine; report that number, never your own estimate.',
