@@ -308,3 +308,49 @@ Befehl an das Modell (R6) erscheint ebenfalls bei 85 %, denn er hängt an dersel
   ist noch nicht gefunden (`~/.dsh/logs` enthält sie nicht); bis dahin ist das Sitzungsprotokoll
   (`compaction/start`, `compaction/end`) der Beleg.
 - Nicht Teil dieser Spec: Rollen für Facharbeiter (anderes Thema, vom Menschen zurückgestellt).
+
+## 10. Nachtrag 2026-11-10: der Plan zählt den Systemprompt als freigebbar
+
+### 10.1 Anordnung des Menschen
+
+2026-11-10, ~00:14, Meldung aus der Sitzung `0b9ffeb1-4e52-4144-bb21-c87476e6e71e` (Lead-Unteragent,
+Route `pcserve/swift-1.5-iq2_xs`): *„The last compaction freed 1857 tokens measured by the engine, not
+the 67257 that the plan suggested“*, dazu *„Bitte nachgucken.“* Auf den Vorschlag, die Tabelle an der Quelle
+zu korrigieren, den Plan ehrlich zu machen und einen Regressionstest anzulegen: *„ja go“*.
+
+### 10.2 Gemessener Hergang (Sitzungsprotokoll, Ortszeit 22:57 bis 22:59)
+
+1. `context_compact_plan` nannte `turns=2: [aa0cb28] .. [a93a957] | frees ~67257 tokens (3 nodes)`; die
+   Oberfläche war 228.113 Token groß. `context_compact` mit `turns=2` meldete `freedTokens: 1857`
+   (Engine-Zähler). Die Belegung stand davor bei 218.894 und danach bei 218.992 Token
+   (`usage.totalTokens`, Schritt 56 und 57): sie stieg um 98. (MESSUNG)
+2. Die erste Plan-Zeile begann bei `seq 9`, der `system/message` auf Oberflächenposition 0
+   (273.178 Zeichen im Protokoll, rund 67.000 bis 76.000 Token). In dieser Sitzung steht `turn/start`
+   von Zug 1 bei `seq 6`, **vor** dem Systemprompt (`seq 9`). `buildTurnTable` ordnet jeden Knoten dem Zug
+   zu, in dessen Bereich er liegt; der Kopf gehörte damit zu Zug 1, und Zug 1 liegt außerhalb des
+   Arbeitsfensters.
+3. `context_compact` schiebt den Start hinter den Kopf (`offSystemHead`, seit trunk.27). Es blieb die
+   Spanne `2393..2209`: der alte Checkpoint (rund 2.000 Token) und zwei Nachrichten von zusammen 298
+   Zeichen. Die Zahl im Plan wurde dabei nicht angepasst.
+4. Nachgerechnet an der aus dem Protokoll nachgebauten Oberfläche (172 Knoten; SCHÄTZUNG, Token aus
+   Zeichen geteilt durch 3,6): Plan heute `turns=2` ≈ 76.000; mit dem Kopf als Präfix bei Arbeitsfenster 3
+   nur `turns=1` ≈ 266, bei Arbeitsfenster 1 `turns=3` ≈ 37.800, bei Arbeitsfenster 0 `turns=4` ≈ 204.600.
+
+### 10.3 Anforderungen
+
+R9. **Der Systemkopf ist Präfix.** Führende `system/message`-Knoten der Oberfläche gehören in der
+    Turn-Tabelle nie zu einem Zug, gleich wo `turn/start` im Log steht. Sie zählen zur Oberfläche
+    (`totalSurfaceTokens`), aber zu keiner Plan-Zeile. Damit rechnen Plan, `turns=N` und der Wächter
+    (R3, R4) mit derselben Zahl, die die Engine später misst. `offSystemHead` bleibt als Sicherheitsnetz.
+
+R10. **Der Plan sagt, was das Arbeitsfenster kostet.** Ist keine Zeile erlaubt oder erreicht die größte
+    Zeile `min_freed` nicht, nennt der Plan, bei welchem kleineren `keep_turns` was frei würde
+    (`turns=N`, Token). Er verändert das Arbeitsfenster nicht selbst; die Wahl bleibt beim Modell und
+    beim Menschen (Anordnung 2026-10-30: `keepTurns` 3).
+
+### 10.4 Abnahme
+
+A6. Regressionstest mit der Lage aus `0b9ffeb1`: `turn/start` vor dem Systemkopf, der Kopf ist 76.000
+    Token groß; Plan bei Arbeitsfenster 3 darf keine Zeile über 1.000 Token zeigen. Beleg:
+    `node --test test/kopf-im-praefix.test.mjs`.
+A7. Der Plan nennt in derselben Lage den Weg über ein kleineres `keep_turns` mit Zahl.
