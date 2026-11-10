@@ -420,3 +420,38 @@ A8. Test: Überschreitung der Grenze mitten im Zug und bei drohender Ablehnung l
     keinen Text; im ersten Schritt eines Zuges liefert er ihn. Beleg: `node --test test/…`.
 A9. Live: in einer Sitzung, die die Grenze mitten im Zug überschreitet, erscheint genau ein `compaction/start`, und
     kein Block `ABSOLUTE COMMAND` steht nach dem Checkpoint.
+
+### 11.6 Entscheidung des Menschen (2026-11-10, ~03:40) und Bauform
+
+Auf die Frage nach der Lösung (a, b oder c): *„A)“*. Das ist: **der Wächter hat Vorrang**; der Befehl an das Modell erscheint
+nur im ersten Schritt eines Zuges und nur, wenn die Anfrage nicht ohnehin abgelehnt würde.
+
+R11. **Eine Überschreitung hat einen Verursacher.**
+  1. Der Anbieter `agent-compact:volume-nudge` liefert den Befehl (R6) nur im **ersten Schritt eines Zuges** und nur,
+     wenn die nächste Anfrage nicht abgelehnt würde (\`wouldOverflow\` ist falsch). Mitten im Zug und bei drohender
+     Ablehnung liefert er nichts: dort verdichtet der Wächter (Lage 2 und 3).
+  2. **Folge aus (a), von mir ergänzt, weil sonst wieder doppelt verdichtet wird:** Hat der Anbieter in einem Zug den
+     Befehl geliefert, verdichtet der Wächter in diesem Zug **mitten im Zug nicht** (Lage 2). Das Modell hat dann
+     den Auftrag, und der Wächter bleibt Rückfall: Zug-Ende (Lage 1) und Verhinderung einer Ablehnung (Lage 3)
+     gelten unverändert. Begründung: Der Block steht im laufenden Zug und kann von einer Verdichtung der fertigen Züge
+     nicht ersetzt werden; er stünde danach unter dem Checkpoint und wirkte frisch (Messung 11.2 Punkt 3).
+  3. Gemeinsamer Zugzustand je Sitzung: Zahl der gesehenen Schritte dieses Zuges, und ob der Befehl in diesem Zug
+     geliefert wurde. Beides wird am Zug-Ende (\`agent/status\` = \`idle\`) gelöscht. Weil \`assemble\` vor dem
+     Waterfall \`agent/pre-step\` läuft (11.3), steht der Zähler beim Anbieter für Schritt N auf N−1.
+
+Nicht gebaut: eine Wartezeit oder Schwelle für das Modell. Ob (2) dem „immer, hart“ (9.1) genügt, ist die Bewertung des
+Autors: Zug-Ende und Überlauf greifen weiter, nur die Verdichtung mitten im Zug entfällt in einem Zug, den das Modell
+übernommen hat. Wenn du das anders willst, sag es.
+
+### 11.7 Gebaut (Version `0.2.1-trunk.32`, noch nicht veröffentlicht)
+
+- `src/turn-state.ts` (neu): gemeinsamer Zugzustand je Sitzung (Schrittzähler, Merker „Befehl geliefert“), `mayIssueCommand`,
+  `sessionKeyOf`; Zurücksetzen am Zug-Ende (`agent/status` = `idle`) und beim Wechsel der Zugnummer.
+- `src/index.ts`: der Anbieter `agent-compact:volume-nudge` liefert den Befehl nur über `mayIssueCommand` (erster Schritt
+  des Zuges, keine drohende Ablehnung).
+- `src/compaction-guard.ts`: Lage 2 (mitten im Zug) entfällt in einem Zug, in dem das Modell den Befehl hat; Lage 1 und 3
+  gelten unverändert.
+- `test/ein-verursacher.test.mjs` (11 neu). 232 Tests grün (`npm run build`, `node --test test/*.test.mjs`). MESSUNG an
+  Nachbildungen des Harness.
+- Nicht geprüft (A9): das Verhalten in einer echten Sitzung, die die Grenze mitten im Zug überschreitet. Ebenfalls nicht
+  geprüft: ob `agent/status` = `idle` nach einem Abbruch durch den Menschen immer ausgelöst wird; die Zugnummer fängt es ab.
