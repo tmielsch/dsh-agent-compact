@@ -19,6 +19,7 @@ import { offSystemHead } from './turns.js'
 import { markerTag } from './anchor.js'
 import { limitNudgeText, nudgeMode, zwischenfazitText } from './phase.js'
 import { boundaryCommandText, budgetSentence, judgeBudget, wouldOverflow, type BudgetPolicy, type BudgetReading } from './budget.js'
+import { createTurnState, mayIssueCommand, sessionKeyOf } from './turn-state.js'
 import { installCompactionGuard, type GuardAgent, type GuardCut } from './compaction-guard.js'
 import { nodeFlatText } from './surface-text.js'
 import { ForkRegistry, SharedTrunkMemo } from './memo.js'
@@ -250,6 +251,9 @@ export function apply(ctx: Context, config: Config) {
     }
     return { promptTokens, windowTokens, reserveTokens }
   }
+
+  // Gemeinsamer Zugzustand von Wächter und Anbieter des Befehls (Spec 11.6, R11).
+  const turnState = createTurnState()
 
   const budgetPolicy: BudgetPolicy = {
     boundaryRatio: typeof config.boundaryRatio === 'number' ? config.boundaryRatio : 0.85,
@@ -516,6 +520,7 @@ export function apply(ctx: Context, config: Config) {
         policy: budgetPolicy,
         compactMidTurn: config.compactMidTurn !== false,
         overflowRecovery: config.overflowRecovery !== false,
+        turnState,
       },
       {
         reading: (a) => {
@@ -640,6 +645,11 @@ export function apply(ctx: Context, config: Config) {
           // Text von Schritt zu Schritt byte-gleich und wird nicht jedes Mal als neuer
           // Block gespeichert (gemessen: 21 Blöcke zu je ~12.000 Zeichen).
           if (verdict.kind !== 'compact') return ''
+          // R11 (Spec 11.6, Entscheidung des Menschen 2026-11-10 „A)“): der Wächter hat Vorrang. Der
+          // Befehl erscheint nur im ersten Schritt eines Zuges und nur, wenn die Anfrage nicht ohnehin
+          // abgelehnt würde; mitten im Zug und bei drohender Ablehnung verdichtet der Wächter selbst.
+          // `assemble` läuft vor `agent/pre-step`, der Zähler steht hier für Schritt N auf N−1.
+          if (!mayIssueCommand(turnState, sessionKeyOf(agent), wouldOverflow(reading, budgetPolicy.safetyTokens))) return ''
           return boundaryCommandText()
         } catch (e) {
           return ''

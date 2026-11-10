@@ -19,6 +19,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { budgetSentence, judgeBudget, wouldOverflow, type BudgetPolicy, type BudgetReading } from './budget.js'
+import { createTurnState, sessionKeyOf, type TurnState } from './turn-state.js'
 
 /** Der Agent, so weit der Guard ihn sieht. */
 export interface GuardAgent {
@@ -59,21 +60,25 @@ export interface GuardOptions {
   compactMidTurn: boolean
   /** Nach `CONTEXT_WINDOW_EXCEEDED` einmal verdichten und wiederholen. */
   overflowRecovery: boolean
+  /**
+   * Gemeinsamer Zugzustand mit dem Anbieter des Befehls (Spec 11.6, R11). Fehlt er, legt der
+   * Wächter einen eigenen an; dann kennt der Anbieter den Zug nicht, und der Wächter sieht nie,
+   * dass der Befehl geliefert wurde.
+   */
+  turnState?: TurnState
 }
 
 /** Grenze im Harness anmelden; gibt den Abmelder zurück. */
 export function installCompactionGuard(ctx: Context, options: GuardOptions, callbacks: GuardCallbacks): () => void {
   const { policy } = options
+  const turnState = options.turnState ?? createTurnState()
   // Eine Verdichtung je Sitzung zur Zeit: der Kern lehnt eine zweite ab, und zwei
   // gleichzeitige Ersetzungen der Oberfläche wären ein Rennen.
   const inFlight = new Set<string>()
   // Ein Wiederholungsversuch je Zug, damit eine Ablehnung nicht in einer Schleife endet.
   const retried = new Map<string, number>()
 
-  const sessionKey = (agent: GuardAgent): string => {
-    const id = agent.session?.id
-    return typeof id === 'string' && id ? id : 'unknown-session'
-  }
+  const sessionKey = (agent: GuardAgent): string => sessionKeyOf(agent)
 
   // Zwei Stufen, je Zug und Stufe höchstens ein Versuch (Entscheidung des Menschen
   // 2026-11-09: „3 ja einen“). Gemessen in Sitzung a856b862: 19 Versuche in einer Stunde,
@@ -200,6 +205,7 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
   disposers.push(onWaterfall('agent/pre-step', async (payload, next) => {
     try {
       const { agent, signal, step, turn } = (payload ?? {}) as { agent?: GuardAgent; signal?: AbortSignal; step?: number; turn?: number }
+      if (agent) turnState.syncTurn(sessionKey(agent), turn)
       if (agent) {
         const judged = verdictFor(agent)
         if (judged) {
@@ -207,7 +213,11 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
           const firstStepOfTurn = typeof step === 'number' && step <= 1
           const overBoundary = judged.verdict.kind === 'compact'
           const alreadySpent = spent.has(sessionKey(agent))
-          const midTurn = overBoundary && options.compactMidTurn && !firstStepOfTurn
+          // R11: hat das Modell in diesem Zug den Befehl bekommen, verdichtet der Wächter mitten im Zug
+          // nicht; sonst verdichten Wächter und Modell für dieselbe Überschreitung zweimal (Sitzung
+          // 0b9ffeb1). Zug-Ende und Verhinderung einer Ablehnung bleiben davon unberührt.
+          const commandIssued = turnState.commandIssued(sessionKey(agent))
+          const midTurn = overBoundary && options.compactMidTurn && !firstStepOfTurn && !commandIssued
           if (overflow || midTurn) {
             callbacks.note(
               'info',
@@ -225,6 +235,12 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
     } catch (error) {
       callbacks.note('warn', 'compaction guard pre-step failed: ' + (error instanceof Error ? error.message : String(error)))
     }
+    try {
+      const { agent } = (payload ?? {}) as { agent?: GuardAgent }
+      if (agent) turnState.noteStep(sessionKey(agent))
+    } catch (error) {
+      /* der Zähler ist nur Auskunft für den Anbieter; ein Fehler hier darf den Schritt nie aufhalten */
+    }
     return next()
   }))
 
@@ -234,6 +250,7 @@ export function installCompactionGuard(ctx: Context, options: GuardOptions, call
       const { agent, status } = (payload ?? {}) as { agent?: GuardAgent; status?: unknown }
       if (!agent || status !== 'idle') return
       retried.delete(sessionKey(agent))
+      turnState.endTurn(sessionKey(agent))
       const judged = verdictFor(agent)
       if (!judged || judged.verdict.kind !== 'compact') return
       // Ist für diese Überschreitung schon verdichtet worden und die Belegung liegt noch
