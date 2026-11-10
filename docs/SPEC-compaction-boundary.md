@@ -365,3 +365,58 @@ A7. Der Plan nennt in derselben Lage den Weg über ein kleineres `keep_turns` mi
   Arbeitsfenster 3 zeigt nur `turns=1` ≈ 266 Token (vorher `turns=2` ≈ 76.000); der Hinweis nennt `keep_turns=0`
   mit `turns=4` ≈ 204.580.
 - Nicht geprüft: das Verhalten des Wächters in einer echten Sitzung mit dieser Lage.
+
+## 11. Nachtrag 2026-11-10: doppelte Verdichtung durch Wächter und Befehl im selben Schritt
+
+### 11.1 Anordnung des Menschen (seine Worte)
+
+2026-11-10, ~03:28, mit Bildschirmfoto der Sitzung `0b9ffeb1-4e52-4144-bb21-c87476e6e71e` (das Modell schreibt
+„Der 上下文 ist an der harten Grenze. Ich verkleinere den ältesten abgeschlossenen Turn …“, der Mensch tippt „du hast
+schobn“): *„Neues problem. Die grenze scheint zu funktionieren, aber doppelte compaction geht gar nicht“*
+
+### 11.2 Gemessener Hergang (Sitzungsprotokoll, Ortszeit, Route `pcserve/swift-1.5-iq2_xs`)
+
+Fenster 512.000, Antwort-Reserve 65.536, Sicherheit 4.096, Anfrage-Budget 442.368, Grenze bei 0,85 = 376.012.
+
+1. 03:06:23, Zug 18 Schritt 58: `usage.totalTokens` 376.871, also 859 Token über der Grenze. (MESSUNG)
+2. 03:06:24 `compaction/start` ohne Werkzeugaufruf davor: der Wächter (Lage 2, mitten im Zug). 03:12:55
+   `compaction/end`, also 6 Minuten 31 Sekunden. Prompt danach 300.157 (Schritt 59), 67,9 % des Budgets. (MESSUNG)
+3. 03:12:55: der Kontextblock mit dem `ABSOLUTE COMMAND` (`seq 4954`) steht **nach** dem Checkpoint (`seq 4950`,
+   `compaction/end` `seq 4951`). Der Block ist nach der Verdichtung angehängt worden. (MESSUNG)
+4. 03:19:03 das Modell ruft `context_compact_plan`: 3 fertige Züge, Arbeitsfenster 3, nichts erlaubt; Hinweis
+   `keep_turns=2` bringe `turns=1` mit rund 10.806 Token.
+5. 03:21:32 das Modell ruft `context_compact` mit `turns=1`, `keep_turns=2`: `freedTokens` 10.806. Das ist die
+   **zweite** Verdichtung innerhalb von 15 Minuten, bei 304.297 Token (68,8 % des Budgets, 16 Punkte unter der Grenze).
+6. 03:25:04 Schritt 61: das Modell will ein drittes Mal verdichten („I must compact now: the harness says …“). Der
+   Mensch bricht ab (`turn/end`, Grund `user`). (MESSUNG)
+
+### 11.3 Ursache (gelesen im Quelltext)
+
+- `dsh-agent-loop/lib/index.js`, `preStep` (Zeilen 902 bis 925): **zuerst** `systemPrompt.assemble`, und dabei ruft das
+  Plugin `agent-compact:volume-nudge` auf und liest die Belegung; **danach** der Waterfall `agent/pre-step`, in dem der
+  Wächter verdichtet; **danach** werden die Kontextnachrichten an die Oberfläche angehängt. Der Befehl wird also mit
+  der Belegung **vor** der Verdichtung berechnet und erst **nach** ihr geschrieben.
+- Der Befehlstext (R6) sagt, er sei erledigt, wenn über ihm eine neuere Verdichtung steht. Hier steht der Block aber
+  unter dem Checkpoint, wirkt also frisch.
+- Der Wächter verdichtet ab dem zweiten Schritt eines Zuges sofort (`compactMidTurn`). Der Befehl erscheint in
+  demselben Schritt. Mitten im Zug kommt er damit immer zu spät: jede Überschreitung der Grenze mitten im Zug löst
+  eine Verdichtung durch den Wächter **und** einen Auftrag an das Modell aus. Sinnvoll ist der Befehl nur im ersten
+  Schritt eines Zuges, wo der Wächter nicht verdichtet (Anordnung 2026-10-30).
+
+### 11.4 Mögliche Lösungen (nicht entschieden)
+
+- (a) **Der Wächter hat Vorrang.** Der Befehl erscheint nur, wenn der Wächter in diesem Schritt nicht verdichtet:
+  im ersten Schritt eines Zuges und nur, wenn die Anfrage nicht ohnehin abgelehnt würde. Mitten im Zug und im
+  Überlauf entfällt er.
+- (b) Das Modell hat Vorrang: der Wächter verdichtet mitten im Zug nicht (`compactMidTurn` aus). Das widerspricht
+  „immer, hart“ (9.1).
+- (c) Der Befehl entfällt ganz, nur der Wächter verdichtet. Das ändert R6.
+
+Empfehlung: (a). Es hält die Zwangs-Verdichtung „immer, hart“ (9.1) und lässt R6 dort bestehen, wo er sinnvoll ist.
+
+### 11.5 Abnahme (vorgesehen)
+
+A8. Test: Überschreitung der Grenze mitten im Zug und bei drohender Ablehnung liefert vom Anbieter `volume-nudge`
+    keinen Text; im ersten Schritt eines Zuges liefert er ihn. Beleg: `node --test test/…`.
+A9. Live: in einer Sitzung, die die Grenze mitten im Zug überschreitet, erscheint genau ein `compaction/start`, und
+    kein Block `ABSOLUTE COMMAND` steht nach dem Checkpoint.
