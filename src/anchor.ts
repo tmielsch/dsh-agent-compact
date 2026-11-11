@@ -52,11 +52,15 @@ export function markerTag(seq: number): string {
   return '[a' + h.slice(0, 6) + ']'
 }
 
-/** Parse a leading `[a###]` marker from an anchor; null when the anchor does not start with one. */
+/** Parse a leading marker from an anchor; null when it is not one. Since #3 the bare id
+ * (`a4ef611`) counts too, but only when that token IS the whole anchor: models copying a
+ * printed id drop the square brackets, and prose opening with a hex-like word must never be misread as one. */
 export function parseAnchorMarker(anchor: string): { tag: string; rest: string } | null {
-  const m = /^\s*\[(a[0-9a-f]{6})\]\s*/i.exec(anchor)
-  if (!m) return null
-  return { tag: m[1].toLowerCase(), rest: anchor.slice(m[0].length) }
+  const bracketed = /^\s*\[(a[0-9a-f]{6})\]\s*/i.exec(anchor)
+  if (bracketed) return { tag: bracketed[1].toLowerCase(), rest: anchor.slice(bracketed[0].length) }
+  const bare = /^\s*(a[0-9a-f]{6})\s*$/i.exec(anchor)
+  if (bare) return { tag: bare[1].toLowerCase(), rest: '' }
+  return null
 }
 
 /** Normalized text without the `[tool-call …]` / `[tool-result]` markers the hints print. */
