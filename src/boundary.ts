@@ -275,11 +275,15 @@ export function resolveUniqueHit(nodes: SurfaceNode[], anchor: string, side: str
   if (hits.length === 0) {
     const hint = nearestHint(nodes, normText(anchor))
     const tail = tailHint(nodes)
+    // #3: a bare marker id (a model copied the printed token without its brackets) is told
+    // what to copy instead of being sent to generic text anchoring. A bracketed id that hit nothing stays on the hint path — wrapping cannot help there.
+    const bareId = /^\s*(a[0-9a-f]{6})\s*$/i.exec(anchor)
     throw new Error(
       side + ' not found on the surface: ' + preview(anchor, 120) +
+      (bareId ? '\ndid you mean [' + bareId[1].toLowerCase() + ']? copy the marker id with its square brackets.' : '') +
         '\nOnly what was actually exchanged is on the surface. Text that stood only in your own reasoning/thinking is NOT on the surface and can never be an anchor — pick the opening words of a visible message instead (its text, a tool call with its arguments, or a team message’s body).' +
         (hint ? '\nclosest nodes (by wording, each with its marker):\n' + hint : '') +
-        (tail ? '\nlast messages on the surface (copy a marker, or the opening words of one):\n' + tail : ''),
+        (tail ? '\nlast messages on the surface (copy a marker id with its square brackets, or the opening words of one):\n' + tail : ''),
     )
   }
   throw new Error(

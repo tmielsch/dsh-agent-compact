@@ -210,3 +210,11 @@ test('anchor: parseAnchorMarker erkennt die Kennung und trennt den Rest', () => 
   assert.equal(parseAnchorMarker('kein Marker am Anfang'), null)
   assert.equal(parseAnchorMarker('[b7f315f] falscher Buchstabe'), null)
 })
+test('anchor: parseAnchorMarker akzeptiert die ID-Rohform nur als ganzen Anker (#3)', () => {
+  assert.deepEqual(parseAnchorMarker('a7f315f'), { tag: 'a7f315f', rest: '' })
+  assert.deepEqual(parseAnchorMarker('  A7F315F '), { tag: 'a7f315f', rest: '' })
+  assert.equal(parseAnchorMarker('a4ef611 [tool-call run_code]'), null)
+  assert.equal(parseAnchorMarker('a7f315f danach Text'), null)
+  assert.equal(parseAnchorMarker('[a7f315f'), null)
+})
+

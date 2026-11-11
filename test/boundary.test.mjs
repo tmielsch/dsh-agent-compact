@@ -607,3 +607,28 @@ test('gebautes lib/index.js trägt den Wiederholungsschritt für die Systemkopf-
   // würde Inhalt verlieren (zwei Tests haben das 2026-10-30 bewiesen).
   assert.equal(code.includes('Math.max(head, 1)'), false)
 })
+
+// ---- #3: die Marker-Kennung wird ohne Klammern kopiert ---------------------
+test('resolveBoundaries: die ID-Rohform trifft denselben Knoten wie die Klammerform (#3)', () => {
+  const nodes = [userNode(1, 'do step one please'), assistantTextNode(2, 'working on step one now')]
+  const b = resolveBoundaries(nodes, { startAnchor: markerTag(2).slice(1, -1) })
+  assert.equal(b.startSeq, 2)
+})
+
+test('resolveBoundaries: eine ID-Rohform ohne Knoten nennt die Klammerform als Rat (#3)', () => {
+  const nodes = [userNode(1, 'do step one please'), assistantTextNode(2, 'working on step one now')]
+  const roh = markerTag(987654).slice(1, -1)
+  assert.throws(() => resolveBoundaries(nodes, { startAnchor: roh }), (err) => {
+    assert.match(err.message, /not found on the surface/)
+    if (!err.message.includes('did you mean [' + roh.toLowerCase() + ']')) throw new Error('Rat fehlt: ' + err.message.slice(0, 300))
+    return true
+  })
+})
+
+test('resolveBoundaries: eine unbekannte Klammer-Kennung bekommt keinen duplizierten Rat (#3)', () => {
+  const nodes = [userNode(1, 'do step one please')]
+  assert.throws(() => resolveBoundaries(nodes, { startAnchor: '[a7f315f] danach Text' }), (err) => {
+    assert.match(err.message, /not found on the surface/)
+    return !/did you mean/.test(err.message)
+  })
+})
